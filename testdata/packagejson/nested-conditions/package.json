@@ -1,0 +1,14 @@
+{
+  "name": "nested-pkg",
+  "version": "1.0.0",
+  "exports": {
+    ".": {
+      "browser": {
+        "import": "./browser/index.mjs",
+        "default": "./browser/index.js"
+      },
+      "import": "./node/index.mjs",
+      "default": "./node/index.js"
+    }
+  }
+}

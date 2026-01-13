@@ -1,0 +1,6 @@
+{
+  "wildcard": {
+    "pattern": "./*",
+    "target": "dist/"
+  }
+}

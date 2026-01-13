@@ -1,0 +1,12 @@
+{
+  "name": "@myorg/core",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./utils": "./src/utils.js"
+  },
+  "dependencies": {
+    "lit": "^3.0.0"
+  }
+}

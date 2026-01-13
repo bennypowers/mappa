@@ -1,0 +1,20 @@
+{
+  "packages": {
+    "lit": {
+      "version": "3.1.0",
+      "integrity": "sha512-abc123=="
+    },
+    "@lit/reactive-element": {
+      "version": "2.0.1",
+      "integrity": "sha512-def456=="
+    },
+    "lit-html": {
+      "version": "3.1.0",
+      "integrity": "sha512-ghi789=="
+    },
+    "lit-element": {
+      "version": "4.0.1",
+      "integrity": "sha512-jkl012=="
+    }
+  }
+}

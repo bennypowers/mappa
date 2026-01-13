@@ -1,0 +1,10 @@
+{
+  "imports": [
+    {"specifier": "lit", "dynamic": false},
+    {"specifier": "lit/decorators.js", "dynamic": false},
+    {"specifier": "./components/button.js", "dynamic": false},
+    {"specifier": "./styles.css", "dynamic": false},
+    {"specifier": "other-module", "dynamic": false},
+    {"specifier": "./lazy.js", "dynamic": true}
+  ]
+}

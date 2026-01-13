@@ -1,0 +1,13 @@
+{
+  "name": "@myorg/components",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./button": "./src/button.js"
+  },
+  "dependencies": {
+    "@myorg/core": "^1.0.0",
+    "lit": "^3.0.0"
+  }
+}

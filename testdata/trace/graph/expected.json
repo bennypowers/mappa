@@ -1,0 +1,14 @@
+{
+  "entrypoints": ["app.js"],
+  "modules": [
+    "app.js",
+    "components/header.js",
+    "components/footer.js",
+    "components/nav.js"
+  ],
+  "bare_specifiers": [
+    "lit",
+    "lit/decorators.js",
+    "lit/directives/class-map.js"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "lodash": "/node_modules/lodash/lodash.js"
+  }
+}

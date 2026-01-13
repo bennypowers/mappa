@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js"
+  },
+  "scopes": {
+    "/node_modules/lit/": {
+      "@lit/reactive-element": "/node_modules/@lit/reactive-element/reactive-element.js"
+    }
+  }
+}

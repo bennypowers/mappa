@@ -1,0 +1,7 @@
+{
+  "imports": [
+    {"specifier": "source-module", "dynamic": false},
+    {"specifier": "named-module", "dynamic": false},
+    {"specifier": "default-module", "dynamic": false}
+  ]
+}

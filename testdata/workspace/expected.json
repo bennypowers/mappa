@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "@myorg/core": "/packages/core/src/index.js",
+    "@myorg/core/utils": "/packages/core/src/utils.js",
+    "@myorg/components": "/packages/components/src/index.js",
+    "@myorg/components/button": "/packages/components/src/button.js",
+    "lit": "/node_modules/lit/index.js",
+    "lit/decorators.js": "/node_modules/lit/decorators.js"
+  }
+}

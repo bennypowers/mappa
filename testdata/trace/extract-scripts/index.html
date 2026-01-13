@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Test</title>
+</head>
+<body>
+  <script type="module" src="./main.js"></script>
+  <script type="module">
+    import { foo } from './lib.js';
+    import { bar } from 'lit';
+    console.log(foo, bar);
+  </script>
+  <script>
+    // Regular script, no type
+    console.log("hello");
+  </script>
+</body>
+</html>

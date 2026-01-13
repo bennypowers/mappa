@@ -1,0 +1,9 @@
+{
+  "name": "subpath-pkg",
+  "version": "1.0.0",
+  "exports": {
+    ".": "./index.js",
+    "./button": "./components/button.js",
+    "./card": "./components/card.js"
+  }
+}

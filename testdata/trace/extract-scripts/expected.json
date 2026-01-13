@@ -1,0 +1,22 @@
+{
+  "scripts": [
+    {
+      "type": "module",
+      "src": "./main.js",
+      "inline": false,
+      "imports": null
+    },
+    {
+      "type": "module",
+      "src": "",
+      "inline": true,
+      "imports": ["./lib.js", "lit"]
+    },
+    {
+      "type": "",
+      "src": "",
+      "inline": true,
+      "imports": null
+    }
+  ]
+}

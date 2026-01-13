@@ -1,0 +1,6 @@
+{
+  "imports": [
+    {"specifier": "type-module", "dynamic": false},
+    {"specifier": "real-module", "dynamic": false}
+  ]
+}

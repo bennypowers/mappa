@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "lit": "https://cdn.jsdelivr.net/npm/lit@3.0.0/index.js",
+    "lodash": "/node_modules/lodash/lodash.js"
+  }
+}
