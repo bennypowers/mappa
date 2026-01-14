@@ -173,7 +173,11 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve: %w", err)
 	}
 
-	jsonOutput := generatedMap.ToJSON()
+	return outputImportMap(osfs, generatedMap.ToJSON(), viper.GetString("format"))
+}
+
+// outputImportMap pretty-prints an import map and writes it to stdout or file.
+func outputImportMap(osfs fs.FileSystem, jsonOutput string, format string) error {
 	if jsonOutput == "" {
 		jsonOutput = "{}"
 	}
@@ -186,7 +190,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if viper.GetString("format") == "html" {
+	if format == "html" {
 		jsonOutput = fmt.Sprintf(`<script type="importmap">
 %s
 </script>`, jsonOutput)
@@ -239,10 +243,21 @@ func runTrace(cmd *cobra.Command, args []string) error {
 
 	format, _ := cmd.Flags().GetString("format")
 
+	// Validate format flag
+	switch format {
+	case "json", "html", "specifiers":
+		// valid
+	default:
+		return fmt.Errorf("invalid format %q: must be one of json, html, specifiers", format)
+	}
+
 	// Handle specifiers format (legacy output for debugging)
 	if format == "specifiers" {
 		return runTraceSpecifiers(cmd, osfs, graph, issues)
 	}
+
+	// Get bare specifiers once for reuse
+	bareSpecs := graph.BareSpecifiers()
 
 	// Generate import map from traced specifiers
 	templateArg, _ := cmd.Flags().GetString("template")
@@ -252,7 +267,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	conditions, _ := cmd.Flags().GetStringSlice("conditions")
 
 	// Build resolver with traced packages only
-	resolver := local.New(osfs, nil).WithPackages(graph.BareSpecifiers())
+	resolver := local.New(osfs, nil).WithPackages(bareSpecs)
 	resolver, err = resolver.WithTemplate(templateArg)
 	if err != nil {
 		return fmt.Errorf("invalid template: %w", err)
@@ -270,7 +285,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 
 	// Filter the import map to only include traced specifiers
 	bareSpecifiers := make(map[string]bool)
-	for _, spec := range graph.BareSpecifiers() {
+	for _, spec := range bareSpecs {
 		bareSpecifiers[spec] = true
 	}
 
@@ -291,30 +306,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		filteredMap.Scopes = nil
 	}
 
-	jsonOutput := filteredMap.ToJSON()
-	if jsonOutput == "" {
-		jsonOutput = "{}"
-	}
-
-	// Pretty print
-	var pretty map[string]any
-	if err := json.Unmarshal([]byte(jsonOutput), &pretty); err == nil {
-		if prettyBytes, err := json.MarshalIndent(pretty, "", "  "); err == nil {
-			jsonOutput = string(prettyBytes)
-		}
-	}
-
-	if format == "html" {
-		jsonOutput = fmt.Sprintf(`<script type="importmap">
-%s
-</script>`, jsonOutput)
-	}
-
-	if output := viper.GetString("output"); output != "" {
-		return osfs.WriteFile(output, []byte(jsonOutput+"\n"), 0644)
-	}
-	fmt.Println(jsonOutput)
-	return nil
+	return outputImportMap(osfs, filteredMap.ToJSON(), format)
 }
 
 // runTraceSpecifiers outputs the legacy specifiers format for debugging.

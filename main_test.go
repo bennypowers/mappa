@@ -19,13 +19,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
+
+var update = flag.Bool("update", false, "update golden files")
 
 func TestMain(m *testing.M) {
 	// Build the binary before running tests
@@ -46,6 +48,31 @@ func mustGetwd() string {
 		panic(err)
 	}
 	return wd
+}
+
+// compareOrUpdateGolden compares output against a golden file, or updates it if --update is set.
+func compareOrUpdateGolden(t *testing.T, goldenPath string, actual string) {
+	t.Helper()
+
+	if *update {
+		if err := os.WriteFile(goldenPath, []byte(actual), 0644); err != nil {
+			t.Fatalf("Failed to update golden file: %v", err)
+		}
+		return
+	}
+
+	expected, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("Failed to read golden file %s: %v", goldenPath, err)
+	}
+
+	// Normalize line endings and trailing whitespace
+	actualNorm := strings.TrimSpace(actual)
+	expectedNorm := strings.TrimSpace(string(expected))
+
+	if actualNorm != expectedNorm {
+		t.Errorf("Output does not match golden file %s\nExpected:\n%s\n\nActual:\n%s", goldenPath, expectedNorm, actualNorm)
+	}
 }
 
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
@@ -166,6 +193,7 @@ func TestGenerateOutputFile(t *testing.T) {
 func TestTrace(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
 	htmlFile := filepath.Join(fixtureDir, "index.html")
+	goldenFile := filepath.Join(fixtureDir, "expected.json")
 
 	// Default format (json) outputs import map
 	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir)
@@ -173,51 +201,20 @@ func TestTrace(t *testing.T) {
 		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
-	}
-
-	// Should have imports key (import map format)
-	imports, ok := result["imports"].(map[string]any)
-	if !ok || imports == nil {
-		t.Fatal("Expected imports object in output")
-	}
-
-	// Check that lit is in the imports
-	if imports["lit"] == nil {
-		t.Error("Expected 'lit' in imports")
-	}
+	compareOrUpdateGolden(t, goldenFile, stdout)
 }
 
 func TestTraceSpecifiersFormat(t *testing.T) {
-	fixtureDir := filepath.Join("testdata", "trace", "extract-scripts")
+	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
 	htmlFile := filepath.Join(fixtureDir, "index.html")
+	goldenFile := filepath.Join(fixtureDir, "expected-specifiers.json")
 
 	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir, "--format", "specifiers")
 	if code != 0 {
 		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
 	}
 
-	var result struct {
-		Entrypoints    []string `json:"entrypoints"`
-		Modules        []string `json:"modules"`
-		BareSpecifiers []string `json:"bare_specifiers"`
-		Packages       []string `json:"packages"`
-	}
-
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
-	}
-
-	if len(result.Entrypoints) == 0 {
-		t.Error("Expected at least one entrypoint")
-	}
-
-	// Check that bare specifiers were found
-	if !slices.Contains(result.BareSpecifiers, "lit") {
-		t.Errorf("Expected 'lit' in bare specifiers, got %v", result.BareSpecifiers)
-	}
+	compareOrUpdateGolden(t, goldenFile, stdout)
 }
 
 func TestTraceHTMLFormat(t *testing.T) {
@@ -246,30 +243,14 @@ func TestTraceHTMLFormat(t *testing.T) {
 func TestTraceWithTemplate(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
 	htmlFile := filepath.Join(fixtureDir, "index.html")
+	goldenFile := filepath.Join(fixtureDir, "expected-template.json")
 
 	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir, "--template", "/assets/{package}/{path}")
 	if code != 0 {
 		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
-	}
-
-	imports, ok := result["imports"].(map[string]any)
-	if !ok {
-		t.Fatal("Expected imports object")
-	}
-
-	// Check that lit import uses the custom template
-	litPath, ok := imports["lit"].(string)
-	if !ok {
-		t.Fatal("Expected 'lit' import")
-	}
-	if !strings.HasPrefix(litPath, "/assets/lit/") {
-		t.Errorf("Expected lit path to start with /assets/lit/, got %s", litPath)
-	}
+	compareOrUpdateGolden(t, goldenFile, stdout)
 }
 
 func TestTraceMissingFile(t *testing.T) {
@@ -291,6 +272,24 @@ func TestTraceMissingArg(t *testing.T) {
 
 	if !strings.Contains(stderr, "accepts 1 arg") {
 		t.Errorf("Expected argument error, got: %s", stderr)
+	}
+}
+
+func TestTraceInvalidFormat(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
+	htmlFile := filepath.Join(fixtureDir, "index.html")
+
+	_, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir, "--format", "invalid")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for invalid format")
+	}
+
+	if !strings.Contains(stderr, "invalid format") {
+		t.Errorf("Expected 'invalid format' error, got: %s", stderr)
+	}
+
+	if !strings.Contains(stderr, "json, html, specifiers") {
+		t.Errorf("Expected allowed formats in error, got: %s", stderr)
 	}
 }
 
