@@ -281,6 +281,37 @@ func TestWildcardExports(t *testing.T) {
 	}
 }
 
+func TestResolveExportWildcard(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/wildcard-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	tests := []struct {
+		subpath  string
+		expected string
+	}{
+		{".", "index.js"},
+		{"./foo", "dist/foo.js"},
+		{"./bar/baz", "dist/bar/baz.js"},
+		{"./components/button", "dist/components/button.js"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(tt.subpath, nil)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) failed: %v", tt.subpath, err)
+			}
+			if resolved != tt.expected {
+				t.Errorf("ResolveExport(%q) = %q, want %q", tt.subpath, resolved, tt.expected)
+			}
+		})
+	}
+}
+
 func TestHasTrailingSlashExport(t *testing.T) {
 	tests := []struct {
 		name     string

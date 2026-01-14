@@ -171,13 +171,38 @@ func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (str
 		return "", ErrNotExported
 	}
 
-	// Look up the subpath
+	// Look up the subpath directly first
 	exportValue, ok := exportsMap[subpath]
-	if !ok {
-		return "", ErrNotExported
+	if ok {
+		return resolveExportValueWithOpts(exportValue, opts)
 	}
 
-	return resolveExportValueWithOpts(exportValue, opts)
+	// Try wildcard pattern matching (e.g., "./*" -> "./elements/*")
+	for pattern, value := range exportsMap {
+		if !strings.Contains(pattern, "*") {
+			continue
+		}
+
+		// Match pattern like "./*" or "./*.js"
+		matched, captured := matchExportPattern(pattern, subpath)
+		if !matched {
+			continue
+		}
+
+		// Resolve the target value
+		target, err := resolveExportValueWithOpts(value, opts)
+		if err != nil {
+			continue
+		}
+
+		// Replace * in target with captured portion
+		if strings.Contains(target, "*") {
+			return strings.Replace(target, "*", captured, 1), nil
+		}
+		return target, nil
+	}
+
+	return "", ErrNotExported
 }
 
 // ExportEntries returns all non-wildcard export entries from the package.
@@ -358,4 +383,39 @@ func resolveConditionsWithOpts(conditions map[string]any, opts *ResolveOptions) 
 // trimDotSlash removes a leading "./" from a path.
 func trimDotSlash(path string) string {
 	return strings.TrimPrefix(path, "./")
+}
+
+// matchExportPattern matches a subpath against an export pattern with wildcards.
+// Pattern examples: "./*", "./*.js", "./lib/*"
+// Returns (matched, captured) where captured is the portion matching *.
+func matchExportPattern(pattern, subpath string) (bool, string) {
+	// Find the position of * in pattern
+	starIdx := strings.Index(pattern, "*")
+	if starIdx == -1 {
+		return false, ""
+	}
+
+	prefix := pattern[:starIdx]
+	suffix := pattern[starIdx+1:]
+
+	// Check if subpath matches the prefix and suffix
+	if !strings.HasPrefix(subpath, prefix) {
+		return false, ""
+	}
+
+	remaining := subpath[len(prefix):]
+
+	if suffix == "" {
+		// Pattern like "./*" - capture everything after prefix
+		return true, remaining
+	}
+
+	// Pattern like "./*.js" - suffix must match
+	if !strings.HasSuffix(remaining, suffix) {
+		return false, ""
+	}
+
+	// Capture is the part between prefix and suffix
+	captured := remaining[:len(remaining)-len(suffix)]
+	return true, captured
 }

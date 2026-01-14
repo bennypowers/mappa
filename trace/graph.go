@@ -22,8 +22,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"bennypowers.dev/mappa/fs"
+	"bennypowers.dev/mappa/packagejson"
 )
 
 // ModuleGraph represents the complete module dependency graph.
@@ -50,8 +52,18 @@ type Module struct {
 
 // Tracer builds module graphs from HTML and JavaScript entrypoints.
 type Tracer struct {
-	fs      fs.FileSystem
-	rootDir string
+	fs              fs.FileSystem
+	rootDir         string
+	nodeModulesPath string // Path to node_modules for resolving bare specifiers
+	followBare      bool   // Whether to follow bare specifier imports into node_modules
+	selfPkg         *packagejson.PackageJSON // Current package for self-referencing imports
+	selfPkgPath     string                   // Path to current package root
+
+	// pkgCache caches parsed package.json files by path (thread-safe).
+	pkgCache sync.Map // map[string]*packagejson.PackageJSON
+	// moduleCache caches traced modules by path (thread-safe).
+	// Used for cross-file caching in batch mode.
+	moduleCache sync.Map // map[string]*Module
 }
 
 // NewTracer creates a new Tracer for the given root directory.
@@ -59,6 +71,33 @@ func NewTracer(fs fs.FileSystem, rootDir string) *Tracer {
 	return &Tracer{
 		fs:      fs,
 		rootDir: rootDir,
+	}
+}
+
+// WithNodeModules returns a new Tracer that resolves bare specifiers from the given
+// node_modules path. When set, the tracer will follow transitive dependencies.
+func (t *Tracer) WithNodeModules(nodeModulesPath string) *Tracer {
+	return &Tracer{
+		fs:              t.fs,
+		rootDir:         t.rootDir,
+		nodeModulesPath: nodeModulesPath,
+		followBare:      true,
+		selfPkg:         t.selfPkg,
+		selfPkgPath:     t.selfPkgPath,
+	}
+}
+
+// WithSelfPackage returns a new Tracer that recognizes imports of the given package
+// as self-references and resolves them locally. This is used when tracing a package
+// that imports itself (e.g., @rhds/elements importing @rhds/elements/rh-button/rh-button.js).
+func (t *Tracer) WithSelfPackage(pkg *packagejson.PackageJSON, pkgPath string) *Tracer {
+	return &Tracer{
+		fs:              t.fs,
+		rootDir:         t.rootDir,
+		nodeModulesPath: t.nodeModulesPath,
+		followBare:      t.followBare,
+		selfPkg:         pkg,
+		selfPkgPath:     pkgPath,
 	}
 }
 
@@ -99,6 +138,21 @@ func (t *Tracer) TraceHTML(htmlPath string) (*ModuleGraph, error) {
 			for _, imp := range script.Imports {
 				if isBareSpecifier(imp) {
 					graph.bareSpecifiers[imp] = true
+
+					// Follow bare specifiers into node_modules if configured
+					if t.followBare {
+						depPath, err := t.resolveBareSpecifier(imp)
+						if err != nil {
+							graph.Errors = append(graph.Errors, fmt.Errorf("resolving %s: %w", imp, err))
+							continue
+						}
+						if depPath != "" {
+							if err := t.traceModule(graph, depPath); err != nil {
+								graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", depPath, err))
+								continue
+							}
+						}
+					}
 				} else {
 					// Relative import from inline script
 					modulePath := t.resolvePath(htmlDir, imp)
@@ -131,36 +185,66 @@ func (t *Tracer) TraceModule(modulePath string) (*ModuleGraph, error) {
 
 // traceModule recursively traces a module and its dependencies.
 func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
-	// Already traced?
+	// Already traced in this graph?
 	if mod, exists := graph.Modules[modulePath]; exists && mod.Traced {
 		return nil
 	}
 
-	// Read the module
-	content, err := t.fs.ReadFile(modulePath)
-	if err != nil {
-		return err
+	// Try to get cached module (avoid re-parsing)
+	var mod *Module
+	if cached, ok := t.moduleCache.Load(modulePath); ok {
+		// Use cached module info (imports are already parsed)
+		cachedMod := cached.(*Module)
+		mod = &Module{
+			Path:    cachedMod.Path,
+			Imports: cachedMod.Imports,
+			Traced:  true,
+		}
+	} else {
+		// Read and parse the module
+		content, err := t.fs.ReadFile(modulePath)
+		if err != nil {
+			return err
+		}
+
+		imports, err := ExtractImports(content)
+		if err != nil {
+			return err
+		}
+
+		mod = &Module{
+			Path:    modulePath,
+			Imports: imports,
+			Traced:  true,
+		}
+
+		// Cache the parsed module for reuse across graphs
+		t.moduleCache.Store(modulePath, mod)
 	}
 
-	// Parse imports
-	imports, err := ExtractImports(content)
-	if err != nil {
-		return err
-	}
-
-	// Record this module
-	mod := &Module{
-		Path:    modulePath,
-		Imports: imports,
-		Traced:  true,
-	}
+	// Record this module in this graph
 	graph.Modules[modulePath] = mod
 
 	// Process imports
 	moduleDir := filepath.Dir(modulePath)
-	for _, imp := range imports {
+	for _, imp := range mod.Imports {
 		if isBareSpecifier(imp.Specifier) {
 			graph.bareSpecifiers[imp.Specifier] = true
+
+			// Follow bare specifiers into node_modules if configured
+			if t.followBare {
+				depPath, err := t.resolveBareSpecifier(imp.Specifier)
+				if err != nil {
+					graph.Errors = append(graph.Errors, fmt.Errorf("resolving %s: %w", imp.Specifier, err))
+					continue
+				}
+				if depPath != "" {
+					if err := t.traceModule(graph, depPath); err != nil {
+						graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", depPath, err))
+						continue
+					}
+				}
+			}
 		} else {
 			// Relative or absolute path - resolve and trace
 			depPath := t.resolvePath(moduleDir, imp.Specifier)
@@ -172,6 +256,103 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 	}
 
 	return nil
+}
+
+// getPackageJSON returns a cached package.json, parsing and caching it if needed.
+// Returns nil if the package.json doesn't exist or can't be parsed.
+func (t *Tracer) getPackageJSON(pkgJSONPath string) *packagejson.PackageJSON {
+	// Check cache first
+	if cached, ok := t.pkgCache.Load(pkgJSONPath); ok {
+		if cached == nil {
+			return nil // Cached negative result
+		}
+		return cached.(*packagejson.PackageJSON)
+	}
+
+	// Parse and cache
+	pkg, err := packagejson.ParseFile(t.fs, pkgJSONPath)
+	if err != nil {
+		t.pkgCache.Store(pkgJSONPath, nil) // Cache negative result
+		return nil
+	}
+	t.pkgCache.Store(pkgJSONPath, pkg)
+	return pkg
+}
+
+// resolveBareSpecifier resolves a bare specifier to a file path.
+// First checks if the specifier is a self-reference (current package importing itself),
+// then falls back to node_modules resolution.
+// Returns empty string if the specifier cannot be resolved.
+func (t *Tracer) resolveBareSpecifier(specifier string) (string, error) {
+	pkgName := getPackageName(specifier)
+	subpath := strings.TrimPrefix(specifier, pkgName)
+	if subpath == "" {
+		subpath = "."
+	} else {
+		// Convert "/subpath" to "./subpath"
+		subpath = "." + subpath
+	}
+
+	// Check for self-referencing import (package imports itself)
+	if t.selfPkg != nil && pkgName == t.selfPkg.Name {
+		return t.resolveSelfImport(subpath)
+	}
+
+	// Fall back to node_modules resolution
+	if t.nodeModulesPath == "" {
+		return "", nil
+	}
+
+	// Load package.json from node_modules (cached)
+	pkgPath := filepath.Join(t.nodeModulesPath, pkgName)
+	pkgJSONPath := filepath.Join(pkgPath, "package.json")
+	pkg := t.getPackageJSON(pkgJSONPath)
+	if pkg == nil {
+		// Package not found - can't follow
+		return "", nil
+	}
+
+	// Try to resolve through exports
+	resolved, err := pkg.ResolveExport(subpath, nil)
+	if err == nil {
+		return filepath.Join(pkgPath, resolved), nil
+	}
+
+	// Fall back to direct subpath
+	if subpath == "." {
+		if pkg.Main != "" {
+			return filepath.Join(pkgPath, strings.TrimPrefix(pkg.Main, "./")), nil
+		}
+		return filepath.Join(pkgPath, "index.js"), nil
+	}
+
+	// Use subpath directly
+	return filepath.Join(pkgPath, strings.TrimPrefix(subpath, "./")), nil
+}
+
+// resolveSelfImport resolves an import of the current package (self-reference).
+// The subpath should already be normalized to start with "./" or be ".".
+func (t *Tracer) resolveSelfImport(subpath string) (string, error) {
+	if t.selfPkg == nil {
+		return "", nil
+	}
+
+	// Try to resolve through exports
+	resolved, err := t.selfPkg.ResolveExport(subpath, nil)
+	if err == nil {
+		return filepath.Join(t.selfPkgPath, resolved), nil
+	}
+
+	// Fall back to direct subpath
+	if subpath == "." {
+		if t.selfPkg.Main != "" {
+			return filepath.Join(t.selfPkgPath, strings.TrimPrefix(t.selfPkg.Main, "./")), nil
+		}
+		return filepath.Join(t.selfPkgPath, "index.js"), nil
+	}
+
+	// Use subpath directly
+	return filepath.Join(t.selfPkgPath, strings.TrimPrefix(subpath, "./")), nil
 }
 
 // resolvePath resolves a specifier relative to a base directory.

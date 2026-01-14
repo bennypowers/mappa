@@ -21,6 +21,7 @@ package importmap
 import (
 	"encoding/json"
 	"maps"
+	"strings"
 )
 
 // ImportMap represents an ES module import map.
@@ -128,6 +129,94 @@ func (im *ImportMap) Clone() *ImportMap {
 	return result
 }
 
+// Simplify removes import entries that are covered by trailing-slash keys.
+// For example, if "lit/" exists, "lit/html.js" is redundant and removed.
+// The same simplification is applied to each scope.
+// Returns a new ImportMap; the original is not modified.
+func (im *ImportMap) Simplify() *ImportMap {
+	if im == nil {
+		return nil
+	}
+
+	result := &ImportMap{}
+
+	// Simplify imports
+	if im.Imports != nil {
+		result.Imports = simplifyImports(im.Imports)
+	}
+
+	// Simplify each scope
+	if im.Scopes != nil {
+		result.Scopes = make(map[string]map[string]string, len(im.Scopes))
+		for scope, imports := range im.Scopes {
+			result.Scopes[scope] = simplifyImports(imports)
+		}
+	}
+
+	// Copy integrity as-is
+	if im.Integrity != nil {
+		result.Integrity = make(map[string]string, len(im.Integrity))
+		maps.Copy(result.Integrity, im.Integrity)
+	}
+
+	// Clean up empty maps
+	if len(result.Imports) == 0 {
+		result.Imports = nil
+	}
+	if len(result.Scopes) == 0 {
+		result.Scopes = nil
+	}
+	if len(result.Integrity) == 0 {
+		result.Integrity = nil
+	}
+
+	return result
+}
+
+// simplifyImports removes entries covered by trailing-slash keys.
+func simplifyImports(imports map[string]string) map[string]string {
+	// First, collect all trailing-slash keys
+	trailingSlashKeys := make(map[string]bool)
+	for key := range imports {
+		if strings.HasSuffix(key, "/") {
+			trailingSlashKeys[key] = true
+		}
+	}
+
+	// If no trailing-slash keys, return a copy as-is
+	if len(trailingSlashKeys) == 0 {
+		result := make(map[string]string, len(imports))
+		maps.Copy(result, imports)
+		return result
+	}
+
+	// Filter out entries covered by trailing-slash keys
+	result := make(map[string]string)
+	for key, value := range imports {
+		// Keep trailing-slash keys themselves
+		if strings.HasSuffix(key, "/") {
+			result[key] = value
+			continue
+		}
+
+		// Check if this key is covered by any trailing-slash key
+		covered := false
+		for tsKey := range trailingSlashKeys {
+			prefix := strings.TrimSuffix(tsKey, "/")
+			if strings.HasPrefix(key, prefix+"/") {
+				covered = true
+				break
+			}
+		}
+
+		if !covered {
+			result[key] = value
+		}
+	}
+
+	return result
+}
+
 // ToJSON converts the import map to an indented JSON string.
 // Returns an empty string if the import map is nil or entirely empty.
 func (im *ImportMap) ToJSON() string {
@@ -147,4 +236,29 @@ func (im *ImportMap) ToJSON() string {
 func (im *ImportMap) MarshalJSON() ([]byte, error) {
 	type alias ImportMap
 	return json.Marshal((*alias)(im))
+}
+
+// ToHTML wraps the import map JSON in an HTML script tag.
+func (im *ImportMap) ToHTML() string {
+	jsonStr := im.ToJSON()
+	if jsonStr == "" {
+		jsonStr = "{}"
+	}
+	return "<script type=\"importmap\">\n" + jsonStr + "\n</script>"
+}
+
+// Format returns the import map in the specified format.
+// Supported formats: "json" (default), "html".
+// Returns empty JSON object "{}" if the import map is empty.
+func (im *ImportMap) Format(format string) string {
+	switch format {
+	case "html":
+		return im.ToHTML()
+	default:
+		jsonStr := im.ToJSON()
+		if jsonStr == "" {
+			return "{}"
+		}
+		return jsonStr
+	}
 }

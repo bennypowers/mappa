@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "lit/": "/node_modules/lit/",
+    "lit/html.js": "/node_modules/lit/html.js",
+    "lit/decorators.js": "/node_modules/lit/decorators.js",
+    "@scope/pkg": "/node_modules/@scope/pkg/index.js",
+    "@scope/pkg/": "/node_modules/@scope/pkg/",
+    "@scope/pkg/utils.js": "/node_modules/@scope/pkg/utils.js"
+  }
+}

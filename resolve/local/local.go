@@ -202,6 +202,8 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 // This directly maps each specifier to a resolved URL using the template,
 // attempting to resolve subpaths through package.json exports when available.
 // Falls back to direct subpath mapping if exports resolution fails.
+// When a package supports trailing-slash exports, uses a single trailing-slash
+// key instead of individual entries for each subpath.
 func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[string]string {
 	result := make(map[string]string)
 	if len(specifiers) == 0 {
@@ -212,53 +214,100 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
 	opts := r.resolveOpts()
 
+	// Group specifiers by package name
+	pkgSpecifiers := make(map[string][]string)
 	for _, spec := range specifiers {
 		pkgName := parsePackageName(spec)
-		subpath := strings.TrimPrefix(spec, pkgName)
-		if subpath == "" {
-			subpath = "."
-		} else {
-			// Convert "/subpath" to "./subpath"
-			subpath = "." + subpath
-		}
+		pkgSpecifiers[pkgName] = append(pkgSpecifiers[pkgName], spec)
+	}
 
-		// Try to resolve through package.json exports
+	// Process each package
+	for pkgName, specs := range pkgSpecifiers {
 		pkgPath := filepath.Join(nodeModulesPath, pkgName)
 		pkgJSONPath := filepath.Join(pkgPath, "package.json")
 		pkg, err := r.parsePackageJSON(pkgJSONPath)
 
-		var resolvedPath string
-		if err == nil {
-			// Try to resolve through exports
+		if err != nil {
+			if r.logger != nil {
+				r.logger.Warning("Could not parse package.json for %s: %v", pkgName, err)
+			}
+			// Fall back to individual entries without exports resolution
+			for _, spec := range specs {
+				subpath := strings.TrimPrefix(spec, pkgName)
+				if subpath == "" {
+					result[spec] = r.template.Expand(pkgName, "", "index.js")
+				} else {
+					result[spec] = r.template.Expand(pkgName, "", strings.TrimPrefix(subpath, "/"))
+				}
+			}
+			continue
+		}
+
+		// Check for wildcard exports and create trailing-slash keys for each
+		wildcards := pkg.WildcardExports(opts)
+		trailingSlashPrefixes := make(map[string]bool) // track which prefixes have trailing-slash keys
+
+		// Add trailing-slash keys for each wildcard pattern
+		for _, w := range wildcards {
+			// Pattern like "./*" or "./lib/*" -> key like "pkg/" or "pkg/lib/"
+			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
+			importKey := pkgName + "/" + patternPrefix
+			result[importKey] = r.template.Expand(pkgName, "", w.Target)
+			trailingSlashPrefixes[importKey] = true
+		}
+
+		// For packages with no exports, add trailing-slash key
+		if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
+			result[pkgName+"/"] = r.template.Expand(pkgName, "", "")
+			trailingSlashPrefixes[pkgName+"/"] = true
+		}
+
+		// Add entries for each specifier
+		for _, spec := range specs {
+			subpath := strings.TrimPrefix(spec, pkgName)
+			if subpath == "" {
+				subpath = "."
+			} else {
+				subpath = "." + subpath
+			}
+
+			// Skip subpath entries if covered by any trailing-slash key
+			if subpath != "." {
+				covered := false
+				for prefix := range trailingSlashPrefixes {
+					// prefix ends with "/" so this checks if spec is a subpath
+					if strings.HasPrefix(spec, prefix) {
+						covered = true
+						break
+					}
+				}
+				if covered {
+					continue
+				}
+			}
+
+			// Resolve the specifier
+			var resolvedPath string
 			resolved, resolveErr := pkg.ResolveExport(subpath, opts)
 			if resolveErr == nil {
 				resolvedPath = resolved
 			}
-		}
 
-		// Fall back to direct subpath if exports resolution failed
-		if resolvedPath == "" {
-			if subpath == "." {
-				// Try main field
-				if pkg != nil && pkg.Main != "" {
-					resolvedPath = strings.TrimPrefix(pkg.Main, "./")
+			// Fall back to direct subpath
+			if resolvedPath == "" {
+				if subpath == "." {
+					if pkg.Main != "" {
+						resolvedPath = strings.TrimPrefix(pkg.Main, "./")
+					} else {
+						resolvedPath = "index.js"
+					}
 				} else {
-					// Default fallback - may not exist for all packages
-					resolvedPath = "index.js"
+					resolvedPath = strings.TrimPrefix(subpath, "./")
 				}
-			} else {
-				// Use subpath directly (strip leading ./)
-				resolvedPath = strings.TrimPrefix(subpath, "./")
 			}
-		}
 
-		// Log warning if package.json couldn't be parsed
-		if err != nil && r.logger != nil {
-			r.logger.Warning("Could not parse package.json for %s: %v", pkgName, err)
+			result[spec] = r.template.Expand(pkgName, "", resolvedPath)
 		}
-
-		// Apply template to generate the URL
-		result[spec] = r.template.Expand(pkgName, "", resolvedPath)
 	}
 
 	return result
@@ -771,9 +820,35 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			continue
 		}
 
-		// Add all export entries for this dependency
+		// Handle wildcard exports (trailing slash imports)
+		wildcards := depPkg.WildcardExports(opts)
+		hasTrailingSlash := depPkg.HasTrailingSlashExport(opts) && len(wildcards) == 0
+
+		// Check for simple wildcard patterns that can be simplified
+		if len(wildcards) == 1 && wildcards[0].Pattern == "./*" {
+			hasTrailingSlash = true
+		}
+
+		// Add trailing-slash keys for wildcard exports
+		for _, w := range wildcards {
+			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
+			importKey := depName + "/" + patternPrefix
+			scopeEntries[importKey] = r.template.Expand(depName, "", w.Target)
+		}
+
+		// For packages with no exports, add trailing-slash key
+		if hasTrailingSlash && len(wildcards) == 0 {
+			scopeEntries[depName+"/"] = r.template.Expand(depName, "", "")
+		}
+
+		// Add export entries, but skip subpaths covered by trailing-slash keys
 		entries := depPkg.ExportEntries(opts)
 		for _, entry := range entries {
+			// Skip subpath entries if covered by trailing-slash key
+			if hasTrailingSlash && entry.Subpath != "." {
+				continue
+			}
+
 			var importKey string
 			if entry.Subpath == "." {
 				importKey = depName
@@ -782,14 +857,6 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 				importKey = depName + "/" + subpath
 			}
 			scopeEntries[importKey] = r.template.Expand(depName, "", entry.Target)
-		}
-
-		// Handle wildcard exports (trailing slash imports)
-		wildcards := depPkg.WildcardExports(opts)
-		for _, w := range wildcards {
-			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-			importKey := depName + "/" + patternPrefix
-			scopeEntries[importKey] = r.template.Expand(depName, "", w.Target)
 		}
 
 		// Fallback to main if no exports

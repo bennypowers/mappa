@@ -1,6 +1,8 @@
 {
   "entrypoints": null,
-  "modules": null,
+  "modules": [
+    "node_modules/lit/index.js"
+  ],
   "bare_specifiers": [
     "lit"
   ],

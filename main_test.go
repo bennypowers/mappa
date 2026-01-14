@@ -475,6 +475,98 @@ func TestTraceBatchDeepImportNotInExports(t *testing.T) {
 	}
 }
 
+// TestTraceTransitiveDependencies verifies that trace follows bare specifier
+// imports into node_modules and traces their transitive dependencies.
+// This is a regression test for https://github.com/bennypowers/mappa/issues/22
+func TestTraceTransitiveDependencies(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "transitive")
+	file := filepath.Join(fixtureDir, "index.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Parse output
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
+	}
+
+	imports, ok := result["imports"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected 'imports' key in output, got keys: %v", result)
+	}
+
+	// HTML imports @example/button/button.js which internally imports:
+	// - lit (from 'lit')
+	// - lit/decorators.js (from 'lit/decorators.js')
+	// All three should be in the imports
+	expectedImports := []string{
+		"@example/button/button.js",
+		"lit",
+		"lit/decorators.js",
+	}
+
+	for _, spec := range expectedImports {
+		if imports[spec] == nil {
+			t.Errorf("Expected %q in imports, got: %v", spec, imports)
+		}
+	}
+}
+
+// TestTraceTransitiveDependenciesSpecifiers verifies that the specifiers format
+// includes all transitive bare specifiers.
+func TestTraceTransitiveDependenciesSpecifiers(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "transitive")
+	file := filepath.Join(fixtureDir, "index.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file, "--package", fixtureDir, "-f", "specifiers")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Parse output
+	var result struct {
+		BareSpecifiers []string `json:"bare_specifiers"`
+		Packages       []string `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
+	}
+
+	// Should have transitive specifiers
+	expectedSpecifiers := []string{
+		"@example/button/button.js",
+		"lit",
+		"lit/decorators.js",
+	}
+
+	specSet := make(map[string]bool)
+	for _, s := range result.BareSpecifiers {
+		specSet[s] = true
+	}
+
+	for _, spec := range expectedSpecifiers {
+		if !specSet[spec] {
+			t.Errorf("Expected %q in bare_specifiers, got: %v", spec, result.BareSpecifiers)
+		}
+	}
+
+	// Should have both packages
+	pkgSet := make(map[string]bool)
+	for _, p := range result.Packages {
+		pkgSet[p] = true
+	}
+
+	if !pkgSet["@example/button"] {
+		t.Errorf("Expected '@example/button' in packages, got: %v", result.Packages)
+	}
+	if !pkgSet["lit"] {
+		t.Errorf("Expected 'lit' in packages, got: %v", result.Packages)
+	}
+}
+
 func TestHelp(t *testing.T) {
 	stdout, _, code := runCLI(t, "--help")
 	if code != 0 {

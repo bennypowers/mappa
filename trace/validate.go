@@ -19,6 +19,7 @@ package trace
 import (
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"bennypowers.dev/mappa/fs"
 )
@@ -62,9 +63,12 @@ type ImportIssue struct {
 // ValidateImports checks all bare specifier imports in the graph against the
 // provided dependencies. It returns issues for imports from transitive dependencies,
 // devDependencies, or packages that are not installed.
+// The rootPkgName parameter is used to skip validation for self-referencing imports
+// (when a package imports itself).
 func (g *ModuleGraph) ValidateImports(
 	fsys fs.FileSystem,
 	rootDir string,
+	rootPkgName string,
 	deps map[string]string,
 	devDeps map[string]string,
 ) []ImportIssue {
@@ -79,12 +83,25 @@ func (g *ModuleGraph) ValidateImports(
 
 	for _, p := range paths {
 		mod := g.Modules[p]
+
+		// Skip validation for modules inside node_modules - these are external
+		// dependencies and their imports are their own concern. We only validate
+		// imports from the project's own source files.
+		if strings.Contains(mod.Path, "/node_modules/") {
+			continue
+		}
+
 		for _, imp := range mod.Imports {
 			if !isBareSpecifier(imp.Specifier) {
 				continue
 			}
 
 			pkgName := getPackageName(imp.Specifier)
+
+			// Skip self-referencing imports (package importing itself)
+			if pkgName == rootPkgName {
+				continue
+			}
 
 			// Check if it's a direct dependency - valid, skip
 			if _, ok := deps[pkgName]; ok {

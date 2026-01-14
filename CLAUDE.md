@@ -125,3 +125,7 @@ func ParsePackageJSON(path string) (*PackageJSON, error) {
 ```
 
 When adding new filesystem operations, ensure the interface stays compatible with cem's version.
+
+## Shared logic
+
+similar packages like generate and trace often share concerns (tracing module graphs, caching package.json files, etc). Be sure to share logic where possible, instead of duplicating.
