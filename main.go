@@ -29,6 +29,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/internal/version"
 	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/resolve"
 	"bennypowers.dev/mappa/resolve/local"
@@ -80,6 +81,13 @@ and package names discovered during tracing.`,
 	RunE: runTrace,
 }
 
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version information",
+	Long:  `Print version information for mappa.`,
+	RunE:  runVersion,
+}
+
 func init() {
 	// Root flags (persistent across all commands)
 	rootCmd.PersistentFlags().StringP("package", "p", ".", "Package directory")
@@ -101,9 +109,13 @@ func init() {
 	_ = viper.BindPFlag("template", generateCmd.Flags().Lookup("template"))
 	_ = viper.BindPFlag("conditions", generateCmd.Flags().Lookup("conditions"))
 
+	// Version command flags
+	versionCmd.Flags().StringP("format", "f", "text", "Output format (text, json)")
+
 	// Add commands
 	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(traceCmd)
+	rootCmd.AddCommand(versionCmd)
 }
 
 func main() {
@@ -268,5 +280,24 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return osfs.WriteFile(output, append(out, '\n'), 0644)
 	}
 	fmt.Println(string(out))
+	return nil
+}
+
+func runVersion(cmd *cobra.Command, args []string) error {
+	format, err := cmd.Flags().GetString("format")
+	if err != nil {
+		return fmt.Errorf("error reading format flag: %w", err)
+	}
+	switch format {
+	case "json":
+		buildInfo := version.GetBuildInfo()
+		out, err := json.MarshalIndent(buildInfo, "", "  ")
+		if err != nil {
+			return fmt.Errorf("error marshaling version info: %w", err)
+		}
+		fmt.Println(string(out))
+	default:
+		fmt.Printf("mappa %s\n", version.GetVersion())
+	}
 	return nil
 }
