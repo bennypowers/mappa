@@ -67,16 +67,22 @@ By default, generates local /node_modules paths. Use --template for custom paths
 
 var traceCmd = &cobra.Command{
 	Use:   "trace <file.html>",
-	Short: "Trace HTML file and list bare specifiers",
-	Long: `Trace an HTML file to find all ES module imports.
+	Short: "Trace HTML file and generate minimal import map",
+	Long: `Trace an HTML file to find all ES module imports and generate an import map.
 
-Outputs a JSON object with entrypoints, modules, bare specifiers,
-and package names discovered during tracing.`,
-	Example: `  # Trace an HTML file
+By default, outputs an import map containing only the specifiers actually used.
+Use --format specifiers for debugging to see the raw trace output.`,
+	Example: `  # Trace an HTML file and output minimal import map
   mappa trace index.html
 
-  # Trace with a specific package directory
-  mappa trace index.html --package ./src`,
+  # Custom URL template for resolved paths
+  mappa trace index.html --template "/assets/{package}/{path}"
+
+  # Output as HTML script tag
+  mappa trace index.html --format html
+
+  # Output raw specifiers (debugging)
+  mappa trace index.html --format specifiers`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTrace,
 }
@@ -99,6 +105,11 @@ func init() {
 	generateCmd.Flags().StringArray("include-package", nil, "Additional packages to include (can be repeated)")
 	generateCmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	generateCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
+
+	// Trace command flags
+	traceCmd.Flags().StringP("format", "f", "json", "Output format (json, html, specifiers)")
+	traceCmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
+	traceCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 
 	// Bind flags to viper
 	_ = viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
@@ -174,7 +185,11 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve: %w", err)
 	}
 
-	jsonOutput := generatedMap.ToJSON()
+	return outputImportMap(osfs, generatedMap.ToJSON(), viper.GetString("format"))
+}
+
+// outputImportMap pretty-prints an import map and writes it to stdout or file.
+func outputImportMap(osfs fs.FileSystem, jsonOutput string, format string) error {
 	if jsonOutput == "" {
 		jsonOutput = "{}"
 	}
@@ -187,7 +202,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if viper.GetString("format") == "html" {
+	if format == "html" {
 		jsonOutput = fmt.Sprintf(`<script type="importmap">
 %s
 </script>`, jsonOutput)
@@ -238,7 +253,76 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
 	}
 
-	// Build result with issues
+	format, _ := cmd.Flags().GetString("format")
+
+	// Validate format flag
+	switch format {
+	case "json", "html", "specifiers":
+		// valid
+	default:
+		return fmt.Errorf("invalid format %q: must be one of json, html, specifiers", format)
+	}
+
+	// Handle specifiers format (legacy output for debugging)
+	if format == "specifiers" {
+		return runTraceSpecifiers(cmd, osfs, graph, issues)
+	}
+
+	// Get bare specifiers once for reuse
+	bareSpecs := graph.BareSpecifiers()
+
+	// Generate import map from traced specifiers
+	templateArg, _ := cmd.Flags().GetString("template")
+	if templateArg == "" {
+		templateArg = resolve.DefaultLocalTemplate
+	}
+	conditions, _ := cmd.Flags().GetStringSlice("conditions")
+
+	// Build resolver with traced packages only
+	resolver := local.New(osfs, nil).WithPackages(bareSpecs)
+	resolver, err = resolver.WithTemplate(templateArg)
+	if err != nil {
+		return fmt.Errorf("invalid template: %w", err)
+	}
+	if len(conditions) > 0 {
+		resolver = resolver.WithConditions(conditions)
+	}
+
+	// Find workspace root for node_modules resolution
+	workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
+	generatedMap, err := resolver.Resolve(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("failed to resolve: %w", err)
+	}
+
+	// Filter the import map to only include traced specifiers
+	bareSpecifiers := make(map[string]bool)
+	for _, spec := range bareSpecs {
+		bareSpecifiers[spec] = true
+	}
+
+	filteredImports := make(map[string]string)
+	for key, value := range generatedMap.Imports {
+		if bareSpecifiers[key] {
+			filteredImports[key] = value
+		}
+	}
+
+	filteredMap := &importmap.ImportMap{
+		Imports: filteredImports,
+		Scopes:  generatedMap.Scopes,
+	}
+
+	// Clean up empty scopes
+	if len(filteredMap.Scopes) == 0 {
+		filteredMap.Scopes = nil
+	}
+
+	return outputImportMap(osfs, filteredMap.ToJSON(), format)
+}
+
+// runTraceSpecifiers outputs the legacy specifiers format for debugging.
+func runTraceSpecifiers(_ *cobra.Command, osfs fs.FileSystem, graph *trace.ModuleGraph, issues []trace.ImportIssue) error {
 	type IssueJSON struct {
 		File      string `json:"file"`
 		Line      int    `json:"line"`

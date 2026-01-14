@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "lit": "/assets/lit/index.js"
+  }
+}
