@@ -270,8 +270,8 @@ func TestTraceMissingArg(t *testing.T) {
 		t.Error("Expected non-zero exit code for missing argument")
 	}
 
-	if !strings.Contains(stderr, "accepts 1 arg") {
-		t.Errorf("Expected argument error, got: %s", stderr)
+	if !strings.Contains(stderr, "no files to trace") {
+		t.Errorf("Expected 'no files to trace' error, got: %s", stderr)
 	}
 }
 
@@ -290,6 +290,120 @@ func TestTraceInvalidFormat(t *testing.T) {
 
 	if !strings.Contains(stderr, "json, html, specifiers") {
 		t.Errorf("Expected allowed formats in error, got: %s", stderr)
+	}
+}
+
+func TestTraceBatchMultipleArgs(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Should output NDJSON (one JSON object per line)
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Expected 2 NDJSON lines, got %d: %s", len(lines), stdout)
+	}
+
+	// Parse each line as JSON
+	for i, line := range lines {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("Failed to parse NDJSON line %d: %v\nline: %s", i, err, line)
+		}
+
+		// Each result should have "file" and "imports" keys
+		if result["file"] == nil {
+			t.Errorf("Line %d: expected 'file' key", i)
+		}
+		if result["imports"] == nil {
+			t.Errorf("Line %d: expected 'imports' key", i)
+		}
+	}
+}
+
+func TestTraceBatchGlob(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	globPattern := filepath.Join(fixtureDir, "**", "*.html")
+
+	stdout, stderr, code := runCLI(t, "trace", "--glob", globPattern, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Should find all 3 HTML files
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("Expected 3 NDJSON lines (page1.html, page2.html, subdir/page3.html), got %d: %s", len(lines), stdout)
+	}
+
+	// Parse each line and track found files
+	foundFiles := make(map[string]bool)
+	for i, line := range lines {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("Failed to parse NDJSON line %d: %v", i, err)
+		}
+
+		// Track found files
+		if file, ok := result["file"].(string); ok {
+			foundFiles[filepath.Base(file)] = true
+		}
+
+		// Verify imports contain "lit"
+		imports, ok := result["imports"].(map[string]any)
+		if !ok {
+			t.Errorf("Line %d: expected imports object", i)
+			continue
+		}
+		if imports["lit"] == nil {
+			t.Errorf("Line %d: expected 'lit' in imports", i)
+		}
+	}
+
+	// Verify all expected files were processed
+	expectedFiles := []string{"page1.html", "page2.html", "page3.html"}
+	for _, f := range expectedFiles {
+		if !foundFiles[f] {
+			t.Errorf("Expected file %q not found in output", f)
+		}
+	}
+}
+
+func TestTraceBatchJobs(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+
+	// Test with explicit jobs flag
+	stdout, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir, "-j", "2")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Expected 2 NDJSON lines, got %d", len(lines))
+	}
+}
+
+func TestTraceBatchHTMLFormatError(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+
+	// HTML format should fail for batch mode
+	_, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir, "--format", "html")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for html format in batch mode")
+	}
+
+	if !strings.Contains(stderr, "not supported for batch mode") {
+		t.Errorf("Expected 'not supported for batch mode' error, got: %s", stderr)
 	}
 }
 

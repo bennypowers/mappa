@@ -22,8 +22,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -66,24 +69,30 @@ By default, generates local /node_modules paths. Use --template for custom paths
 }
 
 var traceCmd = &cobra.Command{
-	Use:   "trace <file.html>",
-	Short: "Trace HTML file and generate minimal import map",
-	Long: `Trace an HTML file to find all ES module imports and generate an import map.
+	Use:   "trace [file.html...]",
+	Short: "Trace HTML files and generate minimal import maps",
+	Long: `Trace HTML files to find all ES module imports and generate import maps.
 
-By default, outputs an import map containing only the specifiers actually used.
+For a single file, outputs an import map containing only the specifiers actually used.
+For multiple files (via arguments or --glob), outputs NDJSON with one import map per line.
 Use --format specifiers for debugging to see the raw trace output.`,
-	Example: `  # Trace an HTML file and output minimal import map
+	Example: `  # Trace a single HTML file
   mappa trace index.html
+
+  # Trace multiple files (NDJSON output)
+  mappa trace file1.html file2.html file3.html
+
+  # Trace files matching a glob pattern
+  mappa trace --glob "_site/**/*.html"
+
+  # Parallel processing with custom worker count
+  mappa trace --glob "_site/**/*.html" -j 8
 
   # Custom URL template for resolved paths
   mappa trace index.html --template "/assets/{package}/{path}"
 
-  # Output as HTML script tag
-  mappa trace index.html --format html
-
-  # Output raw specifiers (debugging)
-  mappa trace index.html --format specifiers`,
-	Args: cobra.ExactArgs(1),
+  # Output as HTML script tag (single file only)
+  mappa trace index.html --format html`,
 	RunE: runTrace,
 }
 
@@ -110,6 +119,8 @@ func init() {
 	traceCmd.Flags().StringP("format", "f", "json", "Output format (json, html, specifiers)")
 	traceCmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	traceCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
+	traceCmd.Flags().String("glob", "", "Glob pattern to match HTML files (e.g., \"_site/**/*.html\")")
+	traceCmd.Flags().IntP("jobs", "j", 0, "Number of parallel workers (default: number of CPUs)")
 
 	// Bind flags to viper
 	_ = viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
@@ -216,21 +227,79 @@ func outputImportMap(osfs fs.FileSystem, jsonOutput string, format string) error
 }
 
 func runTrace(cmd *cobra.Command, args []string) error {
-	htmlFile := args[0]
 	osfs := fs.NewOSFileSystem()
-
-	absPath, err := filepath.Abs(htmlFile)
-	if err != nil {
-		return fmt.Errorf("invalid file path: %w", err)
-	}
 
 	absRoot, err := filepath.Abs(viper.GetString("package"))
 	if err != nil {
 		return fmt.Errorf("invalid package directory: %w", err)
 	}
 
+	// Collect files from args and glob pattern, deduplicating by absolute path
+	seen := make(map[string]struct{})
+	var files []string
+
+	for _, arg := range args {
+		absPath, err := filepath.Abs(arg)
+		if err != nil {
+			return fmt.Errorf("invalid file path %q: %w", arg, err)
+		}
+		if _, exists := seen[absPath]; !exists {
+			seen[absPath] = struct{}{}
+			files = append(files, absPath)
+		}
+	}
+
+	// Add files from glob pattern
+	globPattern, _ := cmd.Flags().GetString("glob")
+	if globPattern != "" {
+		matches, err := doublestar.FilepathGlob(globPattern)
+		if err != nil {
+			return fmt.Errorf("invalid glob pattern: %w", err)
+		}
+		for _, match := range matches {
+			absPath, err := filepath.Abs(match)
+			if err != nil {
+				return fmt.Errorf("invalid file path %q: %w", match, err)
+			}
+			if _, exists := seen[absPath]; !exists {
+				seen[absPath] = struct{}{}
+				files = append(files, absPath)
+			}
+		}
+	}
+
+	if len(files) == 0 {
+		return fmt.Errorf("no files to trace: provide file arguments or use --glob")
+	}
+
+	format, _ := cmd.Flags().GetString("format")
+
+	// Validate format flag
+	switch format {
+	case "json", "html", "specifiers":
+		// valid
+	default:
+		return fmt.Errorf("invalid format %q: must be one of json, html, specifiers", format)
+	}
+
+	// Single file mode: use original behavior for backward compatibility
+	if len(files) == 1 {
+		return runTraceSingle(cmd, osfs, files[0], absRoot, format)
+	}
+
+	// Batch mode: NDJSON output with parallel processing
+	// html format doesn't make sense for batch mode
+	if format == "html" {
+		return fmt.Errorf("--format html is not supported for batch mode (multiple files)")
+	}
+
+	return runTraceBatch(cmd, osfs, files, absRoot, format)
+}
+
+// runTraceSingle traces a single file with the original output format.
+func runTraceSingle(cmd *cobra.Command, osfs fs.FileSystem, htmlFile, absRoot, format string) error {
 	tracer := trace.NewTracer(osfs, absRoot)
-	graph, err := tracer.TraceHTML(absPath)
+	graph, err := tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return fmt.Errorf("failed to trace: %w", err)
 	}
@@ -251,16 +320,6 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	for _, issue := range issues {
 		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
 		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
-	}
-
-	format, _ := cmd.Flags().GetString("format")
-
-	// Validate format flag
-	switch format {
-	case "json", "html", "specifiers":
-		// valid
-	default:
-		return fmt.Errorf("invalid format %q: must be one of json, html, specifiers", format)
 	}
 
 	// Handle specifiers format (legacy output for debugging)
@@ -319,6 +378,185 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	}
 
 	return outputImportMap(osfs, filteredMap.ToJSON(), format)
+}
+
+// traceWarning represents a single import validation warning.
+type traceWarning struct {
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Specifier string `json:"specifier"`
+	IssueType string `json:"issue_type"`
+	Package   string `json:"package"`
+}
+
+// traceResult holds the result of tracing a single file.
+type traceResult struct {
+	File     string            `json:"file"`
+	Imports  map[string]string `json:"imports"`
+	Error    string            `json:"error,omitempty"`
+	Warnings []traceWarning    `json:"warnings,omitempty"`
+}
+
+// runTraceBatch traces multiple files in parallel with NDJSON output.
+func runTraceBatch(cmd *cobra.Command, osfs fs.FileSystem, files []string, absRoot, format string) error {
+	// Get parallelism setting
+	parallel, _ := cmd.Flags().GetInt("jobs")
+	if parallel <= 0 {
+		parallel = runtime.NumCPU()
+	}
+
+	// Get template and conditions
+	templateArg, _ := cmd.Flags().GetString("template")
+	if templateArg == "" {
+		templateArg = resolve.DefaultLocalTemplate
+	}
+	conditions, _ := cmd.Flags().GetStringSlice("conditions")
+
+	// Find workspace root once for all files
+	workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
+
+	// Create shared tracer
+	tracer := trace.NewTracer(osfs, absRoot)
+
+	// Parse package.json once for dependency validation
+	pkgPath := filepath.Join(absRoot, "package.json")
+	pkg, _ := packagejson.ParseFile(osfs, pkgPath)
+
+	// Create channels for work distribution
+	jobs := make(chan string, len(files))
+	results := make(chan traceResult, len(files))
+
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for range parallel {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for htmlFile := range jobs {
+				result := traceFile(tracer, osfs, htmlFile, absRoot, workspaceRoot, templateArg, conditions, pkg, format)
+				results <- result
+			}
+		}()
+	}
+
+	// Send jobs
+	for _, file := range files {
+		jobs <- file
+	}
+	close(jobs)
+
+	// Wait for workers and close results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results and output NDJSON, then print warnings serially
+	encoder := json.NewEncoder(os.Stdout)
+	var allWarnings []traceWarning
+	var errorCount int
+	var totalCount int
+	for result := range results {
+		totalCount++
+		if result.Error != "" {
+			errorCount++
+		}
+		// Collect warnings for serial output
+		allWarnings = append(allWarnings, result.Warnings...)
+		// Clear warnings from JSON output (they go to stderr)
+		result.Warnings = nil
+		if err := encoder.Encode(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding result for %s: %v\n", result.File, err)
+		}
+	}
+
+	// Output warnings serially to stderr
+	for _, w := range allWarnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
+		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
+	}
+
+	if errorCount == totalCount {
+		return fmt.Errorf("all %d files failed to trace", errorCount)
+	}
+	return nil
+}
+
+// traceFile traces a single file and returns the result.
+func traceFile(tracer *trace.Tracer, osfs fs.FileSystem, htmlFile, absRoot, workspaceRoot, templateArg string, conditions []string, pkg *packagejson.PackageJSON, format string) traceResult {
+	result := traceResult{File: htmlFile}
+
+	graph, err := tracer.TraceHTML(htmlFile)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	// Validate imports if package.json was parsed
+	if pkg != nil {
+		issues := graph.ValidateImports(osfs, absRoot, pkg.Dependencies, pkg.DevDependencies)
+		for _, issue := range issues {
+			result.Warnings = append(result.Warnings, traceWarning{
+				File:      issue.File,
+				Line:      issue.Line,
+				Specifier: issue.Specifier,
+				IssueType: issue.IssueType.String(),
+				Package:   issue.Package,
+			})
+		}
+	}
+
+	// Handle specifiers format
+	if format == "specifiers" {
+		// For specifiers format in batch mode, include specifier data instead of imports
+		result.Imports = nil
+		// We'll just return the bare specifiers as a simple map for consistency
+		bareSpecs := graph.BareSpecifiers()
+		result.Imports = make(map[string]string)
+		for _, spec := range bareSpecs {
+			result.Imports[spec] = spec // Map specifier to itself for visibility
+		}
+		return result
+	}
+
+	// Get bare specifiers once for reuse
+	bareSpecs := graph.BareSpecifiers()
+	if len(bareSpecs) == 0 {
+		result.Imports = make(map[string]string)
+		return result
+	}
+
+	// Build resolver with traced packages only
+	resolver := local.New(osfs, nil).WithPackages(bareSpecs)
+	resolver, err = resolver.WithTemplate(templateArg)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	if len(conditions) > 0 {
+		resolver = resolver.WithConditions(conditions)
+	}
+
+	generatedMap, err := resolver.Resolve(workspaceRoot)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	// Filter the import map to only include traced specifiers
+	bareSpecifiersSet := make(map[string]bool)
+	for _, spec := range bareSpecs {
+		bareSpecifiersSet[spec] = true
+	}
+
+	result.Imports = make(map[string]string)
+	for key, value := range generatedMap.Imports {
+		if bareSpecifiersSet[key] {
+			result.Imports[key] = value
+		}
+	}
+
+	return result
 }
 
 // runTraceSpecifiers outputs the legacy specifiers format for debugging.
