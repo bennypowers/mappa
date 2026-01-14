@@ -198,6 +198,66 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	return im, err
 }
 
+// ResolveSpecifiers generates import map entries for specific bare specifiers.
+// This directly maps each specifier to a resolved URL using the template,
+// attempting to resolve subpaths through package.json exports when available.
+// Falls back to direct subpath mapping if exports resolution fails.
+func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[string]string {
+	result := make(map[string]string)
+	if len(specifiers) == 0 {
+		return result
+	}
+
+	workspaceRoot := resolve.FindWorkspaceRoot(r.fs, rootDir)
+	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
+	opts := r.resolveOpts()
+
+	for _, spec := range specifiers {
+		pkgName := parsePackageName(spec)
+		subpath := strings.TrimPrefix(spec, pkgName)
+		if subpath == "" {
+			subpath = "."
+		} else {
+			// Convert "/subpath" to "./subpath"
+			subpath = "." + subpath
+		}
+
+		// Try to resolve through package.json exports
+		pkgPath := filepath.Join(nodeModulesPath, pkgName)
+		pkgJSONPath := filepath.Join(pkgPath, "package.json")
+		pkg, err := r.parsePackageJSON(pkgJSONPath)
+
+		var resolvedPath string
+		if err == nil {
+			// Try to resolve through exports
+			resolved, resolveErr := pkg.ResolveExport(subpath, opts)
+			if resolveErr == nil {
+				resolvedPath = resolved
+			}
+		}
+
+		// Fall back to direct subpath if exports resolution failed
+		if resolvedPath == "" {
+			if subpath == "." {
+				// Try main field
+				if pkg != nil && pkg.Main != "" {
+					resolvedPath = strings.TrimPrefix(pkg.Main, "./")
+				} else {
+					resolvedPath = "index.js"
+				}
+			} else {
+				// Use subpath directly (strip leading ./)
+				resolvedPath = strings.TrimPrefix(subpath, "./")
+			}
+		}
+
+		// Apply template to generate the URL
+		result[spec] = r.template.Expand(pkgName, "", resolvedPath)
+	}
+
+	return result
+}
+
 // ResolveWithGraph generates an ImportMap and builds a DependencyGraph.
 // Use this for the initial resolution when you plan to do incremental updates.
 func (r *Resolver) ResolveWithGraph(rootDir string) (*resolve.IncrementalResult, error) {

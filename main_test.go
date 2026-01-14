@@ -407,6 +407,74 @@ func TestTraceBatchHTMLFormatError(t *testing.T) {
 	}
 }
 
+// TestTraceDeepImportNotInExports verifies that traced bare specifiers that
+// are deep imports (not listed in package exports) are still resolved.
+// This is a regression test for https://github.com/bennypowers/mappa/issues/15
+func TestTraceDeepImportNotInExports(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "unresolvable")
+	file := filepath.Join(fixtureDir, "page.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Parse output
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
+	}
+
+	// The traced specifier @example/core/button/button.js should be in imports
+	// even though it's not in the package's exports field
+	imports, ok := result["imports"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected 'imports' key in output, got keys: %v", result)
+	}
+
+	if imports["@example/core/button/button.js"] == nil {
+		t.Errorf("Expected '@example/core/button/button.js' in imports, got: %v", imports)
+	}
+}
+
+// TestTraceBatchDeepImportNotInExports verifies that batch mode correctly resolves
+// traced bare specifiers that are deep imports (not listed in package exports).
+// This is a regression test for https://github.com/bennypowers/mappa/issues/20
+func TestTraceBatchDeepImportNotInExports(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "unresolvable")
+	file1 := filepath.Join(fixtureDir, "page.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Parse NDJSON lines
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Expected 2 NDJSON lines, got %d: %s", len(lines), stdout)
+	}
+
+	for i, line := range lines {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("Failed to parse NDJSON line %d: %v", i, err)
+		}
+
+		imports, ok := result["imports"].(map[string]any)
+		if !ok {
+			t.Errorf("Line %d: expected 'imports' object", i)
+			continue
+		}
+
+		// Both pages import @example/core/button/button.js which is not in exports
+		if imports["@example/core/button/button.js"] == nil {
+			t.Errorf("Line %d: expected '@example/core/button/button.js' in imports, got: %v", i, imports)
+		}
+	}
+}
+
 func TestHelp(t *testing.T) {
 	stdout, _, code := runCLI(t, "--help")
 	if code != 0 {
