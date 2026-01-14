@@ -13,6 +13,7 @@ mappa_test
 # Output of the go coverage tool
 *.out
 coverage.html
+!**/testdata/**/node_modules
 
 # Go workspace file
 go.work
