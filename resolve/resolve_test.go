@@ -170,6 +170,15 @@ func TestDiscoverWorkspacePackages(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name: "missing root package.json",
+			setup: func(mfs *mapfs.MapFileSystem) {
+				mfs.AddDir("/root", 0755)
+			},
+			rootDir:  "/root",
+			expected: nil,
+			wantErr:  true,
+		},
+		{
 			name: "skip directories without package.json",
 			setup: func(mfs *mapfs.MapFileSystem) {
 				mfs.AddFile("/root/package.json", `{"workspaces": ["packages/*"]}`, 0644)

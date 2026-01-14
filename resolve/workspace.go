@@ -62,6 +62,10 @@ func DiscoverWorkspacePackages(fsys fs.FileSystem, rootDir string) ([]WorkspaceP
 
 // expandWorkspacePattern expands a workspace glob pattern to matching directories.
 // Supports patterns like "packages/*", "@scope/*", "libs/*/".
+//
+// Limitations:
+//   - Double-star patterns (**) are not supported (commonly used in pnpm workspaces)
+//   - Wildcards in the middle of a pattern are not supported (e.g., "packages/*/src")
 func expandWorkspacePattern(fsys fs.FileSystem, rootDir, pattern string) ([]string, error) {
 	// Normalize pattern: remove trailing slash
 	pattern = strings.TrimSuffix(pattern, "/")
