@@ -488,6 +488,13 @@ func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex
 		imports[pkgName] = r.template.Expand(pkgName, "", strings.TrimPrefix(pkg.Main, "./"))
 	}
 
+	// Warn if package has no exports and no main - bare specifier won't work
+	if len(entries) == 0 && pkg.Main == "" {
+		if r.logger != nil {
+			r.logger.Warning("Package '%s' has no exports or main field, only subpath imports will work", pkgName)
+		}
+	}
+
 	// Add trailing slash for packages that support it
 	if pkg.HasTrailingSlashExport() && len(wildcards) == 0 {
 		imports[pkgName+"/"] = r.template.Expand(pkgName, "", "")
