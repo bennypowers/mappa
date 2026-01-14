@@ -211,13 +211,14 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	// Parse package.json for dependency validation
 	pkgPath := filepath.Join(absRoot, "package.json")
 	pkg, err := packagejson.ParseFile(osfs, pkgPath)
+	var issues []trace.ImportIssue
 	if err != nil {
-		// If no package.json, skip validation
-		pkg = &packagejson.PackageJSON{}
+		// If no package.json, skip validation entirely
+		issues = nil
+	} else {
+		// Validate imports against dependencies
+		issues = graph.ValidateImports(osfs, absRoot, pkg.Dependencies, pkg.DevDependencies)
 	}
-
-	// Validate imports against dependencies
-	issues := graph.ValidateImports(osfs, absRoot, pkg.Dependencies, pkg.DevDependencies)
 
 	// Print warnings to stderr
 	for _, issue := range issues {

@@ -18,6 +18,7 @@ package trace
 
 import (
 	"path/filepath"
+	"sort"
 
 	"bennypowers.dev/mappa/fs"
 )
@@ -69,7 +70,15 @@ func (g *ModuleGraph) ValidateImports(
 ) []ImportIssue {
 	var issues []ImportIssue
 
-	for _, mod := range g.Modules {
+	// Sort module paths for deterministic output
+	paths := make([]string, 0, len(g.Modules))
+	for p := range g.Modules {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	for _, p := range paths {
+		mod := g.Modules[p]
 		for _, imp := range mod.Imports {
 			if !isBareSpecifier(imp.Specifier) {
 				continue

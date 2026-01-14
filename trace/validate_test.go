@@ -18,6 +18,8 @@ package trace
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
 	"testing"
 
 	"bennypowers.dev/mappa/testutil"
@@ -66,6 +68,18 @@ func TestValidateImports(t *testing.T) {
 	if len(issues) != len(expected.Issues) {
 		t.Fatalf("Expected %d issues, got %d: %+v", len(expected.Issues), len(issues), issues)
 	}
+
+	// Sort both slices for deterministic comparison (map iteration order is random)
+	sort.Slice(issues, func(i, j int) bool {
+		keyI := fmt.Sprintf("%s:%d:%s:%s:%s", issues[i].File, issues[i].Line, issues[i].Specifier, issues[i].Package, issues[i].IssueType.String())
+		keyJ := fmt.Sprintf("%s:%d:%s:%s:%s", issues[j].File, issues[j].Line, issues[j].Specifier, issues[j].Package, issues[j].IssueType.String())
+		return keyI < keyJ
+	})
+	sort.Slice(expected.Issues, func(i, j int) bool {
+		keyI := fmt.Sprintf("%s:%d:%s:%s:%s", expected.Issues[i].File, expected.Issues[i].Line, expected.Issues[i].Specifier, expected.Issues[i].Package, expected.Issues[i].IssueType)
+		keyJ := fmt.Sprintf("%s:%d:%s:%s:%s", expected.Issues[j].File, expected.Issues[j].Line, expected.Issues[j].Specifier, expected.Issues[j].Package, expected.Issues[j].IssueType)
+		return keyI < keyJ
+	})
 
 	for i, exp := range expected.Issues {
 		if issues[i].File != exp.File {
