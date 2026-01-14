@@ -18,7 +18,10 @@ package local_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"slices"
+	"sync"
 	"testing"
 
 	"bennypowers.dev/mappa/importmap"
@@ -28,6 +31,25 @@ import (
 	"bennypowers.dev/mappa/resolve/local"
 	"bennypowers.dev/mappa/testutil"
 )
+
+// mockLogger captures log messages for testing
+type mockLogger struct {
+	mu       sync.Mutex
+	warnings []string
+	debugs   []string
+}
+
+func (m *mockLogger) Warning(format string, args ...any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.warnings = append(m.warnings, fmt.Sprintf(format, args...))
+}
+
+func (m *mockLogger) Debug(format string, args ...any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.debugs = append(m.debugs, fmt.Sprintf(format, args...))
+}
 
 func TestResolver(t *testing.T) {
 	tests := []struct {
@@ -219,5 +241,30 @@ func TestResolverCacheReuse(t *testing.T) {
 	// Results should be equivalent
 	if !reflect.DeepEqual(result1.Imports, result2.Imports) {
 		t.Error("Expected identical results from cached resolves")
+	}
+}
+
+func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/no-exports-pkg", "/test")
+
+	logger := &mockLogger{}
+	resolver := local.New(mfs, logger)
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// Should only have trailing slash mapping, not bare specifier
+	if _, ok := result.Imports["broken-lib"]; ok {
+		t.Error("Expected no bare specifier mapping for package without exports/main")
+	}
+	if result.Imports["broken-lib/"] != "/node_modules/broken-lib/" {
+		t.Errorf("Expected trailing slash mapping, got %v", result.Imports)
+	}
+
+	// Should have logged a warning
+	expectedWarning := "Package 'broken-lib' has no root export or main field; only subpath imports will work"
+	if !slices.Contains(logger.warnings, expectedWarning) {
+		t.Errorf("Expected warning %q, got warnings: %v", expectedWarning, logger.warnings)
 	}
 }
