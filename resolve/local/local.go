@@ -150,28 +150,14 @@ func (r *Resolver) WithPackageCache(cache packagejson.Cache) *Resolver {
 }
 
 // parsePackageJSON parses a package.json file, using the cache if available.
-// If the cache contains the entry, it returns the cached value.
-// Otherwise, it parses from the filesystem and stores in the cache.
+// Uses atomic GetOrLoad to ensure only one goroutine parses a given file.
 func (r *Resolver) parsePackageJSON(path string) (*packagejson.PackageJSON, error) {
-	// Check cache first
 	if r.cache != nil {
-		if pkg, ok := r.cache.Get(path); ok {
-			return pkg, nil
-		}
+		return r.cache.GetOrLoad(path, func() (*packagejson.PackageJSON, error) {
+			return packagejson.ParseFile(r.fs, path)
+		})
 	}
-
-	// Parse from filesystem
-	pkg, err := packagejson.ParseFile(r.fs, path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Store in cache
-	if r.cache != nil {
-		r.cache.Set(path, pkg)
-	}
-
-	return pkg, nil
+	return packagejson.ParseFile(r.fs, path)
 }
 
 // Resolve generates an ImportMap for a project rooted at the given directory.

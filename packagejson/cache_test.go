@@ -17,6 +17,8 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package packagejson_test
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"bennypowers.dev/mappa/packagejson"
@@ -109,4 +111,67 @@ func TestMemoryCacheConcurrency(t *testing.T) {
 func TestCacheInterface(t *testing.T) {
 	// Verify MemoryCache implements Cache interface
 	var _ packagejson.Cache = (*packagejson.MemoryCache)(nil)
+}
+
+func TestMemoryCacheGetOrLoad(t *testing.T) {
+	cache := packagejson.NewMemoryCache()
+
+	loadCount := 0
+	loader := func() (*packagejson.PackageJSON, error) {
+		loadCount++
+		return &packagejson.PackageJSON{Name: "loaded"}, nil
+	}
+
+	// First call should invoke loader
+	pkg, err := cache.GetOrLoad("/path/to/package.json", loader)
+	if err != nil {
+		t.Fatalf("GetOrLoad failed: %v", err)
+	}
+	if pkg.Name != "loaded" {
+		t.Errorf("Expected name 'loaded', got %q", pkg.Name)
+	}
+	if loadCount != 1 {
+		t.Errorf("Expected loader to be called once, called %d times", loadCount)
+	}
+
+	// Second call should use cached value, not invoke loader
+	pkg, err = cache.GetOrLoad("/path/to/package.json", loader)
+	if err != nil {
+		t.Fatalf("GetOrLoad failed: %v", err)
+	}
+	if pkg.Name != "loaded" {
+		t.Errorf("Expected name 'loaded', got %q", pkg.Name)
+	}
+	if loadCount != 1 {
+		t.Errorf("Expected loader to still be called once, called %d times", loadCount)
+	}
+}
+
+func TestMemoryCacheGetOrLoadConcurrent(t *testing.T) {
+	cache := packagejson.NewMemoryCache()
+
+	var loadCount atomic.Int32
+	loader := func() (*packagejson.PackageJSON, error) {
+		loadCount.Add(1)
+		return &packagejson.PackageJSON{Name: "loaded"}, nil
+	}
+
+	// Launch many goroutines trying to load the same path
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := cache.GetOrLoad("/same/path/package.json", loader)
+			if err != nil {
+				t.Errorf("GetOrLoad failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Loader should only be called once due to atomic GetOrLoad
+	if loadCount.Load() != 1 {
+		t.Errorf("Expected loader to be called exactly once, called %d times", loadCount.Load())
+	}
 }

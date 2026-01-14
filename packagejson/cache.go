@@ -31,12 +31,24 @@ type Cache interface {
 
 	// Invalidate removes a cached entry, typically called when a file changes.
 	Invalidate(path string)
+
+	// GetOrLoad atomically retrieves from cache or loads using the provided function.
+	// Only one goroutine should execute the loader for a given path; others wait.
+	GetOrLoad(path string, loader func() (*PackageJSON, error)) (*PackageJSON, error)
+}
+
+// cacheEntry holds a cached value and coordinates concurrent loading.
+type cacheEntry struct {
+	pkg  *PackageJSON
+	err  error
+	once sync.Once
 }
 
 // MemoryCache is a thread-safe in-memory implementation of Cache.
 type MemoryCache struct {
-	mu    sync.RWMutex
-	cache map[string]*PackageJSON
+	mu      sync.RWMutex
+	cache   map[string]*PackageJSON
+	loading sync.Map // map[string]*cacheEntry for in-flight loads
 }
 
 // NewMemoryCache creates a new in-memory cache for package.json files.
@@ -66,4 +78,32 @@ func (c *MemoryCache) Invalidate(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.cache, path)
+}
+
+// GetOrLoad atomically retrieves from cache or loads using the provided function.
+// Only one goroutine will execute the loader for a given path; others wait for the result.
+func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)) (*PackageJSON, error) {
+	// Fast path: check if already cached
+	c.mu.RLock()
+	if pkg, ok := c.cache[path]; ok {
+		c.mu.RUnlock()
+		return pkg, nil
+	}
+	c.mu.RUnlock()
+
+	// Get or create an entry for this path - all concurrent goroutines get the same entry
+	actual, _ := c.loading.LoadOrStore(path, &cacheEntry{})
+	entry := actual.(*cacheEntry)
+
+	// Only one goroutine executes the loader; others block until once.Do completes
+	entry.once.Do(func() {
+		entry.pkg, entry.err = loader()
+		if entry.err == nil {
+			c.mu.Lock()
+			c.cache[path] = entry.pkg
+			c.mu.Unlock()
+		}
+	})
+
+	return entry.pkg, entry.err
 }
