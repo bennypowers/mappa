@@ -29,6 +29,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/resolve"
 	"bennypowers.dev/mappa/resolve/local"
 	"bennypowers.dev/mappa/trace"
@@ -207,11 +208,38 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to trace: %w", err)
 	}
 
+	// Parse package.json for dependency validation
+	pkgPath := filepath.Join(absRoot, "package.json")
+	pkg, err := packagejson.ParseFile(osfs, pkgPath)
+	if err != nil {
+		// If no package.json, skip validation
+		pkg = &packagejson.PackageJSON{}
+	}
+
+	// Validate imports against dependencies
+	issues := graph.ValidateImports(osfs, absRoot, pkg.Dependencies, pkg.DevDependencies)
+
+	// Print warnings to stderr
+	for _, issue := range issues {
+		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
+		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
+	}
+
+	// Build result with issues
+	type IssueJSON struct {
+		File      string `json:"file"`
+		Line      int    `json:"line"`
+		Specifier string `json:"specifier"`
+		Package   string `json:"package"`
+		IssueType string `json:"issue_type"`
+	}
+
 	result := struct {
-		Entrypoints    []string `json:"entrypoints"`
-		Modules        []string `json:"modules"`
-		BareSpecifiers []string `json:"bare_specifiers"`
-		Packages       []string `json:"packages"`
+		Entrypoints    []string    `json:"entrypoints"`
+		Modules        []string    `json:"modules"`
+		BareSpecifiers []string    `json:"bare_specifiers"`
+		Packages       []string    `json:"packages"`
+		Issues         []IssueJSON `json:"issues,omitempty"`
 	}{
 		Entrypoints:    graph.Entrypoints,
 		BareSpecifiers: graph.BareSpecifiers(),
@@ -222,6 +250,16 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		result.Modules = append(result.Modules, p)
 	}
 	sort.Strings(result.Modules)
+
+	for _, issue := range issues {
+		result.Issues = append(result.Issues, IssueJSON{
+			File:      issue.File,
+			Line:      issue.Line,
+			Specifier: issue.Specifier,
+			Package:   issue.Package,
+			IssueType: issue.IssueType.String(),
+		})
+	}
 
 	out, _ := json.MarshalIndent(result, "", "  ")
 
