@@ -18,7 +18,12 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Install Go dependencies and tools
+        run: |
+          go get .
+          go install gotest.tools/gotestsum@latest
+
       - name: Build
         run: go build -v ./...
       - name: Run tests
-        run: go test -v ./...
+        run: gotestsum ./...
