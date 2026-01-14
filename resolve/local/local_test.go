@@ -23,6 +23,7 @@ import (
 
 	"bennypowers.dev/mappa/importmap"
 	"bennypowers.dev/mappa/internal/mapfs"
+	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/resolve"
 	"bennypowers.dev/mappa/resolve/local"
 	"bennypowers.dev/mappa/testutil"
@@ -124,5 +125,99 @@ func TestResolverWorkspaceMode(t *testing.T) {
 	// Verify node_modules dependencies use template paths
 	if result.Imports["lit"] != "/node_modules/lit/index.js" {
 		t.Errorf("Expected lit to use template path, got %s", result.Imports["lit"])
+	}
+}
+
+func TestResolverWithPackageCache(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/simple-pkg", "/test")
+
+	cache := packagejson.NewMemoryCache()
+
+	resolver := local.New(mfs, nil).WithPackageCache(cache)
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// Verify the result is correct
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Expected lit import, got %v", result.Imports)
+	}
+
+	// Verify the cache was populated
+	rootPkg, ok := cache.Get("/test/package.json")
+	if !ok {
+		t.Error("Expected root package.json to be cached")
+	}
+	if rootPkg == nil || rootPkg.Name != "my-app" {
+		t.Errorf("Expected cached root package to be 'my-app', got %v", rootPkg)
+	}
+
+	litPkg, ok := cache.Get("/test/node_modules/lit/package.json")
+	if !ok {
+		t.Error("Expected lit package.json to be cached")
+	}
+	if litPkg == nil || litPkg.Name != "lit" {
+		t.Errorf("Expected cached lit package to be 'lit', got %v", litPkg)
+	}
+}
+
+func TestResolverWithPrepopulatedCache(t *testing.T) {
+	mfs := mapfs.New()
+	mfs.AddDir("/test", 0755)
+	mfs.AddDir("/test/node_modules", 0755)
+	mfs.AddDir("/test/node_modules/my-pkg", 0755)
+
+	// Only add root package.json to filesystem
+	mfs.AddFile("/test/package.json", `{
+		"name": "test",
+		"dependencies": {"my-pkg": "1.0.0"}
+	}`, 0644)
+
+	// Pre-populate cache with my-pkg (simulating previously parsed)
+	cache := packagejson.NewMemoryCache()
+	cache.Set("/test/node_modules/my-pkg/package.json", &packagejson.PackageJSON{
+		Name:    "my-pkg",
+		Version: "1.0.0",
+		Main:    "dist/index.js",
+	})
+
+	// Add empty file so Exists() returns true but ReadFile would fail if called
+	mfs.AddFile("/test/node_modules/my-pkg/package.json", "", 0644)
+
+	resolver := local.New(mfs, nil).WithPackageCache(cache)
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// Verify my-pkg was resolved using cached data (has Main: "dist/index.js")
+	expected := "/node_modules/my-pkg/dist/index.js"
+	if result.Imports["my-pkg"] != expected {
+		t.Errorf("Expected my-pkg import to be %q (from cache), got %q", expected, result.Imports["my-pkg"])
+	}
+}
+
+func TestResolverCacheReuse(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/simple-pkg", "/test")
+
+	cache := packagejson.NewMemoryCache()
+
+	// First resolution
+	resolver := local.New(mfs, nil).WithPackageCache(cache)
+	result1, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("First resolve failed: %v", err)
+	}
+
+	// Second resolution with same cache
+	result2, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Second resolve failed: %v", err)
+	}
+
+	// Results should be equivalent
+	if !reflect.DeepEqual(result1.Imports, result2.Imports) {
+		t.Error("Expected identical results from cached resolves")
 	}
 }

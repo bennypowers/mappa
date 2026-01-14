@@ -31,13 +31,14 @@ import (
 
 // Resolver generates import maps pointing to local node_modules paths.
 type Resolver struct {
-	fs                  fs.FileSystem
-	logger              resolve.Logger
-	additionalPackages  []string
-	template            *resolve.Template
-	inputMap            *importmap.ImportMap
-	workspacePackages   []resolve.WorkspacePackage
-	includeRootExports  bool
+	fs                 fs.FileSystem
+	logger             resolve.Logger
+	additionalPackages []string
+	template           *resolve.Template
+	inputMap           *importmap.ImportMap
+	workspacePackages  []resolve.WorkspacePackage
+	includeRootExports bool
+	cache              packagejson.Cache
 }
 
 // New creates a new local Resolver.
@@ -55,13 +56,14 @@ func New(fs fs.FileSystem, logger resolve.Logger) *Resolver {
 // beyond those listed in package.json dependencies.
 func (r *Resolver) WithPackages(packages []string) *Resolver {
 	return &Resolver{
-		fs:                  r.fs,
-		logger:              r.logger,
-		additionalPackages:  packages,
-		template:            r.template,
-		inputMap:            r.inputMap,
-		workspacePackages:   r.workspacePackages,
-		includeRootExports:  r.includeRootExports,
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: packages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
 	}
 }
 
@@ -72,13 +74,14 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 		return nil, err
 	}
 	return &Resolver{
-		fs:                  r.fs,
-		logger:              r.logger,
-		additionalPackages:  r.additionalPackages,
-		template:            tmpl,
-		inputMap:            r.inputMap,
-		workspacePackages:   r.workspacePackages,
-		includeRootExports:  r.includeRootExports,
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		template:           tmpl,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
 	}, nil
 }
 
@@ -86,13 +89,14 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 // with the generated output. Input map entries take precedence.
 func (r *Resolver) WithInputMap(im *importmap.ImportMap) *Resolver {
 	return &Resolver{
-		fs:                  r.fs,
-		logger:              r.logger,
-		additionalPackages:  r.additionalPackages,
-		template:            r.template,
-		inputMap:            im,
-		workspacePackages:   r.workspacePackages,
-		includeRootExports:  r.includeRootExports,
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		template:           r.template,
+		inputMap:           im,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
 	}
 }
 
@@ -101,13 +105,14 @@ func (r *Resolver) WithInputMap(im *importmap.ImportMap) *Resolver {
 // their dependencies are collected for node_modules resolution.
 func (r *Resolver) WithWorkspacePackages(packages []resolve.WorkspacePackage) *Resolver {
 	return &Resolver{
-		fs:                  r.fs,
-		logger:              r.logger,
-		additionalPackages:  r.additionalPackages,
-		template:            r.template,
-		inputMap:            r.inputMap,
-		workspacePackages:   packages,
-		includeRootExports:  r.includeRootExports,
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  packages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
 	}
 }
 
@@ -116,14 +121,57 @@ func (r *Resolver) WithWorkspacePackages(packages []resolve.WorkspacePackage) *R
 // you want to import the package you're developing by name.
 func (r *Resolver) WithIncludeRootExports() *Resolver {
 	return &Resolver{
-		fs:                  r.fs,
-		logger:              r.logger,
-		additionalPackages:  r.additionalPackages,
-		template:            r.template,
-		inputMap:            r.inputMap,
-		workspacePackages:   r.workspacePackages,
-		includeRootExports:  true,
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: true,
+		cache:              r.cache,
 	}
+}
+
+// WithPackageCache returns a new Resolver that uses the provided cache
+// for parsed package.json files. This allows callers to reuse parsed data
+// across multiple resolution calls, improving performance for hot-reload
+// or monorepo scenarios.
+func (r *Resolver) WithPackageCache(cache packagejson.Cache) *Resolver {
+	return &Resolver{
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              cache,
+	}
+}
+
+// parsePackageJSON parses a package.json file, using the cache if available.
+// If the cache contains the entry, it returns the cached value.
+// Otherwise, it parses from the filesystem and stores in the cache.
+func (r *Resolver) parsePackageJSON(path string) (*packagejson.PackageJSON, error) {
+	// Check cache first
+	if r.cache != nil {
+		if pkg, ok := r.cache.Get(path); ok {
+			return pkg, nil
+		}
+	}
+
+	// Parse from filesystem
+	pkg, err := packagejson.ParseFile(r.fs, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store in cache
+	if r.cache != nil {
+		r.cache.Set(path, pkg)
+	}
+
+	return pkg, nil
 }
 
 // Resolve generates an ImportMap for a project rooted at the given directory.
@@ -150,7 +198,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 
 	// Parse root package.json
 	rootPkgPath := filepath.Join(rootDir, "package.json")
-	rootPkg, err := packagejson.ParseFile(r.fs, rootPkgPath)
+	rootPkg, err := r.parsePackageJSON(rootPkgPath)
 	if err != nil {
 		// No package.json - still apply input map if provided
 		if r.inputMap != nil {
@@ -200,7 +248,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 				return
 			}
 
-			if err := r.addPackageToImportMapSafe(result, &mu, name, depPath); err != nil {
+			if err := r.addPackageToImportMap(result, &mu, name, depPath); err != nil {
 				if r.logger != nil {
 					r.logger.Warning("Failed to add package %s: %v", name, err)
 				}
@@ -256,7 +304,7 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 	// 2. Collect dependencies from all workspace packages (excluding other workspace packages)
 	allDeps := make(map[string]bool)
 	for _, pkg := range r.workspacePackages {
-		pkgJSON, err := packagejson.ParseFile(r.fs, filepath.Join(pkg.Path, "package.json"))
+		pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
 		if err != nil {
 			continue
 		}
@@ -295,7 +343,7 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 				}
 				return
 			}
-			if err := r.addPackageToImportMapSafe(result, &mu, name, depPath); err != nil {
+			if err := r.addPackageToImportMap(result, &mu, name, depPath); err != nil {
 				if r.logger != nil {
 					r.logger.Warning("Failed to add package %s: %v", name, err)
 				}
@@ -334,7 +382,7 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 // addWorkspacePackageToImportMap adds a workspace package's exports to the import map.
 // Unlike node_modules packages, workspace packages use web paths relative to rootDir.
 func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string) error {
-	pkgJSON, err := packagejson.ParseFile(r.fs, filepath.Join(pkg.Path, "package.json"))
+	pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
 	if err != nil {
 		return err
 	}
@@ -419,52 +467,10 @@ func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejs
 }
 
 // addPackageToImportMap adds a package's exports to the import map.
-func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, pkgName, pkgPath string) error {
-	pkgJSONPath := filepath.Join(pkgPath, "package.json")
-	pkg, err := packagejson.ParseFile(r.fs, pkgJSONPath)
-	if err != nil {
-		return err
-	}
-
-	// Get all export entries
-	entries := pkg.ExportEntries()
-	for _, entry := range entries {
-		var importKey string
-		if entry.Subpath == "." {
-			importKey = pkgName
-		} else {
-			subpath := strings.TrimPrefix(entry.Subpath, "./")
-			importKey = pkgName + "/" + subpath
-		}
-		im.Imports[importKey] = r.template.Expand(pkgName, "", entry.Target)
-	}
-
-	// Handle wildcard exports (trailing slash imports)
-	wildcards := pkg.WildcardExports()
-	for _, w := range wildcards {
-		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-		importKey := pkgName + "/" + patternPrefix
-		im.Imports[importKey] = r.template.Expand(pkgName, "", w.Target)
-	}
-
-	// Fallback to main if no exports
-	if len(entries) == 0 && pkg.Main != "" {
-		im.Imports[pkgName] = r.template.Expand(pkgName, "", strings.TrimPrefix(pkg.Main, "./"))
-	}
-
-	// Add trailing slash for packages that support it
-	if pkg.HasTrailingSlashExport() && len(wildcards) == 0 {
-		im.Imports[pkgName+"/"] = r.template.Expand(pkgName, "", "")
-	}
-
-	return nil
-}
-
-// addPackageToImportMapSafe is a thread-safe version of addPackageToImportMap.
 // It builds entries locally first, then acquires the lock to merge them.
-func (r *Resolver) addPackageToImportMapSafe(im *importmap.ImportMap, mu *sync.Mutex, pkgName, pkgPath string) error {
+func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex, pkgName, pkgPath string) error {
 	pkgJSONPath := filepath.Join(pkgPath, "package.json")
-	pkg, err := packagejson.ParseFile(r.fs, pkgJSONPath)
+	pkg, err := r.parsePackageJSON(pkgJSONPath)
 	if err != nil {
 		return err
 	}
@@ -552,7 +558,7 @@ func (r *Resolver) processPackageDependenciesParallel(
 	pkgPath := filepath.Join(nodeModulesPath, pkgName)
 	pkgJSONPath := filepath.Join(pkgPath, "package.json")
 
-	pkg, err := packagejson.ParseFile(r.fs, pkgJSONPath)
+	pkg, err := r.parsePackageJSON(pkgJSONPath)
 	if err != nil {
 		return
 	}
@@ -577,7 +583,7 @@ func (r *Resolver) processPackageDependenciesParallel(
 		}
 
 		depPkgPath := filepath.Join(depPath, "package.json")
-		depPkg, err := packagejson.ParseFile(r.fs, depPkgPath)
+		depPkg, err := r.parsePackageJSON(depPkgPath)
 		if err != nil {
 			continue
 		}
