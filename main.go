@@ -124,7 +124,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	// Parse input map if provided
 	var inputMap *importmap.ImportMap
 	if inputMapPath := viper.GetString("input-map"); inputMapPath != "" {
-		inputMapData, err := os.ReadFile(inputMapPath)
+		inputMapData, err := osfs.ReadFile(inputMapPath)
 		if err != nil {
 			return fmt.Errorf("failed to read input map: %w", err)
 		}
@@ -181,7 +181,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 
 	if output := viper.GetString("output"); output != "" {
-		return os.WriteFile(output, []byte(jsonOutput+"\n"), 0644)
+		return osfs.WriteFile(output, []byte(jsonOutput+"\n"), 0644)
 	}
 	fmt.Println(jsonOutput)
 	return nil
@@ -226,7 +226,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	out, _ := json.MarshalIndent(result, "", "  ")
 
 	if output := viper.GetString("output"); output != "" {
-		return os.WriteFile(output, append(out, '\n'), 0644)
+		return osfs.WriteFile(output, append(out, '\n'), 0644)
 	}
 	fmt.Println(string(out))
 	return nil
