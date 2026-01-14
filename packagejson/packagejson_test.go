@@ -374,3 +374,100 @@ func TestExportEntriesWithConditions(t *testing.T) {
 		t.Errorf("Production conditions: expected dist/prod.js, got %s", entriesProd[0].Target)
 	}
 }
+
+func TestWorkspacePatterns(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		expected []string
+	}{
+		{
+			name:     "array format",
+			json:     `{"name": "test", "workspaces": ["packages/*", "@scope/*"]}`,
+			expected: []string{"packages/*", "@scope/*"},
+		},
+		{
+			name:     "object format with packages key",
+			json:     `{"name": "test", "workspaces": {"packages": ["libs/*"]}}`,
+			expected: []string{"libs/*"},
+		},
+		{
+			name:     "no workspaces field",
+			json:     `{"name": "test"}`,
+			expected: nil,
+		},
+		{
+			name:     "empty array",
+			json:     `{"name": "test", "workspaces": []}`,
+			expected: []string{},
+		},
+		{
+			name:     "empty object packages",
+			json:     `{"name": "test", "workspaces": {"packages": []}}`,
+			expected: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkg, err := packagejson.Parse([]byte(tt.json))
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+
+			patterns := pkg.WorkspacePatterns()
+			if len(patterns) != len(tt.expected) {
+				t.Errorf("WorkspacePatterns() length = %d, want %d", len(patterns), len(tt.expected))
+				return
+			}
+
+			for i, want := range tt.expected {
+				if patterns[i] != want {
+					t.Errorf("WorkspacePatterns()[%d] = %q, want %q", i, patterns[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestHasWorkspaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		expected bool
+	}{
+		{
+			name:     "has workspaces array",
+			json:     `{"name": "test", "workspaces": ["packages/*"]}`,
+			expected: true,
+		},
+		{
+			name:     "has workspaces object",
+			json:     `{"name": "test", "workspaces": {"packages": ["libs/*"]}}`,
+			expected: true,
+		},
+		{
+			name:     "no workspaces",
+			json:     `{"name": "test"}`,
+			expected: false,
+		},
+		{
+			name:     "empty workspaces array",
+			json:     `{"name": "test", "workspaces": []}`,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkg, err := packagejson.Parse([]byte(tt.json))
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+
+			if pkg.HasWorkspaces() != tt.expected {
+				t.Errorf("HasWorkspaces() = %v, want %v", pkg.HasWorkspaces(), tt.expected)
+			}
+		})
+	}
+}

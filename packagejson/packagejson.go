@@ -25,6 +25,12 @@ import (
 	"bennypowers.dev/mappa/fs"
 )
 
+// workspacesObjectFormat represents the object format for workspaces field.
+// Used by yarn classic with nohoist: {"packages": [...], "nohoist": [...]}
+type workspacesObjectFormat struct {
+	Packages []string `json:"packages"`
+}
+
 // ErrNotExported is returned when a subpath is not exported by the package.
 var ErrNotExported = errors.New("not exported by package.json")
 
@@ -48,7 +54,34 @@ type PackageJSON struct {
 	Imports         any               `json:"imports,omitempty"`
 	Dependencies    map[string]string `json:"dependencies,omitempty"`
 	DevDependencies map[string]string `json:"devDependencies,omitempty"`
-	Workspaces      []string          `json:"workspaces,omitempty"`
+	RawWorkspaces   json.RawMessage   `json:"workspaces,omitempty"`
+}
+
+// WorkspacePatterns returns the workspace glob patterns from the workspaces field.
+// Handles both array format ["packages/*"] and object format {"packages": ["libs/*"]}.
+func (pkg *PackageJSON) WorkspacePatterns() []string {
+	if len(pkg.RawWorkspaces) == 0 {
+		return nil
+	}
+
+	// Try array format first (most common)
+	var patterns []string
+	if err := json.Unmarshal(pkg.RawWorkspaces, &patterns); err == nil {
+		return patterns
+	}
+
+	// Try object format with "packages" key (yarn classic with nohoist)
+	var obj workspacesObjectFormat
+	if err := json.Unmarshal(pkg.RawWorkspaces, &obj); err == nil {
+		return obj.Packages
+	}
+
+	return nil
+}
+
+// HasWorkspaces returns true if the package has workspace patterns defined.
+func (pkg *PackageJSON) HasWorkspaces() bool {
+	return len(pkg.WorkspacePatterns()) > 0
 }
 
 // ExportEntry represents a single export from a package.

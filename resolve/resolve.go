@@ -57,7 +57,7 @@ func FindWorkspaceRoot(fs fs.FileSystem, startDir string) string {
 
 		// Check if there's a package.json with workspaces field
 		pkgPath := filepath.Join(dir, "package.json")
-		if pkg, err := packagejson.ParseFile(fs, pkgPath); err == nil && len(pkg.Workspaces) > 0 {
+		if pkg, err := packagejson.ParseFile(fs, pkgPath); err == nil && pkg.HasWorkspaces() {
 			return dir
 		}
 

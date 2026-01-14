@@ -201,9 +201,18 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	}
 	rootDir = absRoot
 
-	// Use workspace mode if workspace packages are configured
+	// Use workspace mode if workspace packages are explicitly configured
 	if len(r.workspacePackages) > 0 {
 		return r.resolveWorkspace(rootDir)
+	}
+
+	// Auto-discover workspace packages from package.json workspaces field
+	discoveredPackages, err := resolve.DiscoverWorkspacePackages(r.fs, rootDir)
+	if err != nil && r.logger != nil {
+		r.logger.Warning("Failed to discover workspace packages: %v", err)
+	}
+	if len(discoveredPackages) > 0 {
+		return r.WithWorkspacePackages(discoveredPackages).resolveWorkspace(rootDir)
 	}
 
 	result := &importmap.ImportMap{

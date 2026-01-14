@@ -268,3 +268,67 @@ func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
 		t.Errorf("Expected warning %q, got warnings: %v", expectedWarning, logger.warnings)
 	}
 }
+
+func TestResolverAutoDiscoverWorkspaces(t *testing.T) {
+	// Use the existing workspace fixture
+	mfs := testutil.NewFixtureFS(t, "workspace", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	// Don't call WithWorkspacePackages - should auto-discover
+	resolver := local.New(mfs, nil)
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// Verify workspace packages are discovered and included
+	if result.Imports["@myorg/core"] != expected.Imports["@myorg/core"] {
+		t.Errorf("@myorg/core import = %q, want %q",
+			result.Imports["@myorg/core"], expected.Imports["@myorg/core"])
+	}
+	if result.Imports["@myorg/components"] != expected.Imports["@myorg/components"] {
+		t.Errorf("@myorg/components import = %q, want %q",
+			result.Imports["@myorg/components"], expected.Imports["@myorg/components"])
+	}
+
+	// Verify node_modules dependencies are included
+	if result.Imports["lit"] != expected.Imports["lit"] {
+		t.Errorf("lit import = %q, want %q", result.Imports["lit"], expected.Imports["lit"])
+	}
+}
+
+func TestResolverExplicitWorkspacesOverrideAutoDiscovery(t *testing.T) {
+	// Use the existing workspace fixture
+	mfs := testutil.NewFixtureFS(t, "workspace", "/test")
+
+	// Explicitly provide only one workspace package
+	workspacePackages := []resolve.WorkspacePackage{
+		{Name: "@myorg/core", Path: "/test/packages/core"},
+	}
+
+	resolver := local.New(mfs, nil).WithWorkspacePackages(workspacePackages)
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// Should have the explicitly provided package
+	if result.Imports["@myorg/core"] != "/packages/core/src/index.js" {
+		t.Errorf("@myorg/core import = %q, want /packages/core/src/index.js",
+			result.Imports["@myorg/core"])
+	}
+
+	// Should NOT have the auto-discovered package (since explicit was provided)
+	if _, ok := result.Imports["@myorg/components"]; ok {
+		t.Error("Expected @myorg/components to not be auto-discovered when explicit packages provided")
+	}
+}
