@@ -341,11 +341,17 @@ func TestTraceBatchGlob(t *testing.T) {
 		t.Fatalf("Expected 3 NDJSON lines (page1.html, page2.html, subdir/page3.html), got %d: %s", len(lines), stdout)
 	}
 
-	// Parse each line
+	// Parse each line and track found files
+	foundFiles := make(map[string]bool)
 	for i, line := range lines {
 		var result map[string]any
 		if err := json.Unmarshal([]byte(line), &result); err != nil {
 			t.Fatalf("Failed to parse NDJSON line %d: %v", i, err)
+		}
+
+		// Track found files
+		if file, ok := result["file"].(string); ok {
+			foundFiles[filepath.Base(file)] = true
 		}
 
 		// Verify imports contain "lit"
@@ -356,6 +362,14 @@ func TestTraceBatchGlob(t *testing.T) {
 		}
 		if imports["lit"] == nil {
 			t.Errorf("Line %d: expected 'lit' in imports", i)
+		}
+	}
+
+	// Verify all expected files were processed
+	expectedFiles := []string{"page1.html", "page2.html", "page3.html"}
+	for _, f := range expectedFiles {
+		if !foundFiles[f] {
+			t.Errorf("Expected file %q not found in output", f)
 		}
 	}
 }

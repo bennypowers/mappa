@@ -234,14 +234,19 @@ func runTrace(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid package directory: %w", err)
 	}
 
-	// Collect files from args and glob pattern
-	files := make([]string, 0, len(args))
+	// Collect files from args and glob pattern, deduplicating by absolute path
+	seen := make(map[string]struct{})
+	var files []string
+
 	for _, arg := range args {
 		absPath, err := filepath.Abs(arg)
 		if err != nil {
 			return fmt.Errorf("invalid file path %q: %w", arg, err)
 		}
-		files = append(files, absPath)
+		if _, exists := seen[absPath]; !exists {
+			seen[absPath] = struct{}{}
+			files = append(files, absPath)
+		}
 	}
 
 	// Add files from glob pattern
@@ -256,7 +261,10 @@ func runTrace(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return fmt.Errorf("invalid file path %q: %w", match, err)
 			}
-			files = append(files, absPath)
+			if _, exists := seen[absPath]; !exists {
+				seen[absPath] = struct{}{}
+				files = append(files, absPath)
+			}
 		}
 	}
 
@@ -372,11 +380,21 @@ func runTraceSingle(cmd *cobra.Command, osfs fs.FileSystem, htmlFile, absRoot, f
 	return outputImportMap(osfs, filteredMap.ToJSON(), format)
 }
 
+// traceWarning represents a single import validation warning.
+type traceWarning struct {
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Specifier string `json:"specifier"`
+	IssueType string `json:"issue_type"`
+	Package   string `json:"package"`
+}
+
 // traceResult holds the result of tracing a single file.
 type traceResult struct {
-	File    string            `json:"file"`
-	Imports map[string]string `json:"imports"`
-	Error   string            `json:"error,omitempty"`
+	File     string            `json:"file"`
+	Imports  map[string]string `json:"imports"`
+	Error    string            `json:"error,omitempty"`
+	Warnings []traceWarning    `json:"warnings,omitempty"`
 }
 
 // runTraceBatch traces multiple files in parallel with NDJSON output.
@@ -433,14 +451,34 @@ func runTraceBatch(cmd *cobra.Command, osfs fs.FileSystem, files []string, absRo
 		close(results)
 	}()
 
-	// Output results as NDJSON
+	// Collect results and output NDJSON, then print warnings serially
 	encoder := json.NewEncoder(os.Stdout)
+	var allWarnings []traceWarning
+	var errorCount int
+	var totalCount int
 	for result := range results {
+		totalCount++
+		if result.Error != "" {
+			errorCount++
+		}
+		// Collect warnings for serial output
+		allWarnings = append(allWarnings, result.Warnings...)
+		// Clear warnings from JSON output (they go to stderr)
+		result.Warnings = nil
 		if err := encoder.Encode(result); err != nil {
 			fmt.Fprintf(os.Stderr, "Error encoding result for %s: %v\n", result.File, err)
 		}
 	}
 
+	// Output warnings serially to stderr
+	for _, w := range allWarnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
+		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
+	}
+
+	if errorCount == totalCount {
+		return fmt.Errorf("all %d files failed to trace", errorCount)
+	}
 	return nil
 }
 
@@ -458,8 +496,13 @@ func traceFile(tracer *trace.Tracer, osfs fs.FileSystem, htmlFile, absRoot, work
 	if pkg != nil {
 		issues := graph.ValidateImports(osfs, absRoot, pkg.Dependencies, pkg.DevDependencies)
 		for _, issue := range issues {
-			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
-			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
+			result.Warnings = append(result.Warnings, traceWarning{
+				File:      issue.File,
+				Line:      issue.Line,
+				Specifier: issue.Specifier,
+				IssueType: issue.IssueType.String(),
+				Package:   issue.Package,
+			})
 		}
 	}
 

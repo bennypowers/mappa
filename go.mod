@@ -3,6 +3,7 @@ module bennypowers.dev/mappa
 go 1.25.5
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.9.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/tree-sitter/go-tree-sitter v0.24.0
@@ -13,7 +14,6 @@ require (
 
 require (
 	github.com/bitfield/gotestdox v0.2.2 // indirect
-	github.com/bmatcuk/doublestar/v4 v4.9.2 // indirect
 	github.com/dnephin/pflag v1.0.7 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
