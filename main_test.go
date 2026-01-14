@@ -164,10 +164,37 @@ func TestGenerateOutputFile(t *testing.T) {
 }
 
 func TestTrace(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
+	htmlFile := filepath.Join(fixtureDir, "index.html")
+
+	// Default format (json) outputs import map
+	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
+	}
+
+	// Should have imports key (import map format)
+	imports, ok := result["imports"].(map[string]any)
+	if !ok || imports == nil {
+		t.Fatal("Expected imports object in output")
+	}
+
+	// Check that lit is in the imports
+	if imports["lit"] == nil {
+		t.Error("Expected 'lit' in imports")
+	}
+}
+
+func TestTraceSpecifiersFormat(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "trace", "extract-scripts")
 	htmlFile := filepath.Join(fixtureDir, "index.html")
 
-	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir)
+	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir, "--format", "specifiers")
 	if code != 0 {
 		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
 	}
@@ -190,6 +217,58 @@ func TestTrace(t *testing.T) {
 	// Check that bare specifiers were found
 	if !slices.Contains(result.BareSpecifiers, "lit") {
 		t.Errorf("Expected 'lit' in bare specifiers, got %v", result.BareSpecifiers)
+	}
+}
+
+func TestTraceHTMLFormat(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
+	htmlFile := filepath.Join(fixtureDir, "index.html")
+
+	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir, "--format", "html")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	if !strings.HasPrefix(stdout, "<script type=\"importmap\">") {
+		t.Errorf("Expected HTML script tag prefix, got: %s", stdout[:min(50, len(stdout))])
+	}
+
+	if !strings.Contains(stdout, "</script>") {
+		t.Error("Expected closing script tag")
+	}
+
+	// Check that lit is in the import map
+	if !strings.Contains(stdout, "\"lit\"") {
+		t.Error("Expected 'lit' in import map")
+	}
+}
+
+func TestTraceWithTemplate(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "with-deps")
+	htmlFile := filepath.Join(fixtureDir, "index.html")
+
+	stdout, stderr, code := runCLI(t, "trace", htmlFile, "--package", fixtureDir, "--template", "/assets/{package}/{path}")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
+	}
+
+	imports, ok := result["imports"].(map[string]any)
+	if !ok {
+		t.Fatal("Expected imports object")
+	}
+
+	// Check that lit import uses the custom template
+	litPath, ok := imports["lit"].(string)
+	if !ok {
+		t.Fatal("Expected 'lit' import")
+	}
+	if !strings.HasPrefix(litPath, "/assets/lit/") {
+		t.Errorf("Expected lit path to start with /assets/lit/, got %s", litPath)
 	}
 }
 
@@ -251,6 +330,25 @@ func TestGenerateHelp(t *testing.T) {
 	for _, s := range expectedStrings {
 		if !strings.Contains(stdout, s) {
 			t.Errorf("Expected %q in generate help output", s)
+		}
+	}
+}
+
+func TestTraceHelp(t *testing.T) {
+	stdout, _, code := runCLI(t, "trace", "--help")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for help, got %d", code)
+	}
+
+	expectedStrings := []string{
+		"--template",
+		"--format",
+		"json, html, specifiers",
+	}
+
+	for _, s := range expectedStrings {
+		if !strings.Contains(stdout, s) {
+			t.Errorf("Expected %q in trace help output", s)
 		}
 	}
 }

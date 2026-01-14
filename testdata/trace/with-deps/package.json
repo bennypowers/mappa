@@ -1,0 +1,6 @@
+{
+  "name": "test-trace-with-deps",
+  "dependencies": {
+    "lit": "^3.0.0"
+  }
+}
