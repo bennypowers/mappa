@@ -1,0 +1,6 @@
+{
+  "name": "test-trace-batch",
+  "dependencies": {
+    "lit": "^3.0.0"
+  }
+}
