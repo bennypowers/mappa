@@ -411,6 +411,17 @@ func runTraceBatch(cmd *cobra.Command, osfs fs.FileSystem, files []string, absRo
 	// Create shared tracer
 	tracer := trace.NewTracer(osfs, absRoot)
 
+	// Create shared base resolver with template and conditions
+	// Each worker will use WithPackages() to create per-file resolvers
+	baseResolver := local.New(osfs, nil)
+	baseResolver, err := baseResolver.WithTemplate(templateArg)
+	if err != nil {
+		return fmt.Errorf("invalid template: %w", err)
+	}
+	if len(conditions) > 0 {
+		baseResolver = baseResolver.WithConditions(conditions)
+	}
+
 	// Parse package.json once for dependency validation
 	pkgPath := filepath.Join(absRoot, "package.json")
 	pkg, _ := packagejson.ParseFile(osfs, pkgPath)
@@ -426,7 +437,7 @@ func runTraceBatch(cmd *cobra.Command, osfs fs.FileSystem, files []string, absRo
 		go func() {
 			defer wg.Done()
 			for htmlFile := range jobs {
-				result := traceFile(tracer, osfs, htmlFile, absRoot, workspaceRoot, templateArg, conditions, pkg, format)
+				result := traceFile(tracer, osfs, htmlFile, absRoot, workspaceRoot, baseResolver, pkg, format)
 				results <- result
 			}
 		}()
@@ -476,7 +487,7 @@ func runTraceBatch(cmd *cobra.Command, osfs fs.FileSystem, files []string, absRo
 }
 
 // traceFile traces a single file and returns the result.
-func traceFile(tracer *trace.Tracer, osfs fs.FileSystem, htmlFile, absRoot, workspaceRoot, templateArg string, conditions []string, pkg *packagejson.PackageJSON, format string) traceResult {
+func traceFile(tracer *trace.Tracer, osfs fs.FileSystem, htmlFile, absRoot, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, format string) traceResult {
 	result := traceResult{File: htmlFile}
 
 	graph, err := tracer.TraceHTML(htmlFile)
@@ -519,20 +530,9 @@ func traceFile(tracer *trace.Tracer, osfs fs.FileSystem, htmlFile, absRoot, work
 		return result
 	}
 
-	// Build resolver for the traced packages
-	resolver := local.New(osfs, nil).WithPackages(bareSpecs)
-	resolver, err = resolver.WithTemplate(templateArg)
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	if len(conditions) > 0 {
-		resolver = resolver.WithConditions(conditions)
-	}
-
 	// Resolve traced specifiers directly using ResolveSpecifiers
 	// This handles deep imports that may not be in package exports
-	result.Imports = resolver.ResolveSpecifiers(workspaceRoot, bareSpecs)
+	result.Imports = baseResolver.ResolveSpecifiers(workspaceRoot, bareSpecs)
 
 	return result
 }

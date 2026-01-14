@@ -243,12 +243,18 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 				if pkg != nil && pkg.Main != "" {
 					resolvedPath = strings.TrimPrefix(pkg.Main, "./")
 				} else {
+					// Default fallback - may not exist for all packages
 					resolvedPath = "index.js"
 				}
 			} else {
 				// Use subpath directly (strip leading ./)
 				resolvedPath = strings.TrimPrefix(subpath, "./")
 			}
+		}
+
+		// Log warning if package.json couldn't be parsed
+		if err != nil && r.logger != nil {
+			r.logger.Warning("Could not parse package.json for %s: %v", pkgName, err)
 		}
 
 		// Apply template to generate the URL
