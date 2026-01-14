@@ -194,6 +194,26 @@ func (r *Resolver) parsePackageJSON(path string) (*packagejson.PackageJSON, erro
 
 // Resolve generates an ImportMap for a project rooted at the given directory.
 func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
+	im, _, err := r.resolveInternal(rootDir, nil)
+	return im, err
+}
+
+// ResolveWithGraph generates an ImportMap and builds a DependencyGraph.
+// Use this for the initial resolution when you plan to do incremental updates.
+func (r *Resolver) ResolveWithGraph(rootDir string) (*resolve.IncrementalResult, error) {
+	graph := resolve.NewDependencyGraph()
+	im, graph, err := r.resolveInternal(rootDir, graph)
+	if err != nil {
+		return nil, err
+	}
+	return &resolve.IncrementalResult{
+		ImportMap:       im,
+		DependencyGraph: graph,
+	}, nil
+}
+
+// resolveInternal is the core resolution logic, optionally tracking dependencies in graph.
+func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGraph) (*importmap.ImportMap, *resolve.DependencyGraph, error) {
 	// Normalize rootDir
 	absRoot, err := filepath.Abs(rootDir)
 	if err != nil {
@@ -203,7 +223,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 
 	// Use workspace mode if workspace packages are explicitly configured
 	if len(r.workspacePackages) > 0 {
-		return r.resolveWorkspace(rootDir)
+		return r.resolveWorkspaceInternal(rootDir, graph)
 	}
 
 	// Auto-discover workspace packages from package.json workspaces field
@@ -212,7 +232,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 		r.logger.Warning("Failed to discover workspace packages: %v", err)
 	}
 	if len(discoveredPackages) > 0 {
-		return r.WithWorkspacePackages(discoveredPackages).resolveWorkspace(rootDir)
+		return r.WithWorkspacePackages(discoveredPackages).resolveWorkspaceInternal(rootDir, graph)
 	}
 
 	result := &importmap.ImportMap{
@@ -229,9 +249,9 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	if err != nil {
 		// No package.json - still apply input map if provided
 		if r.inputMap != nil {
-			return result.Merge(r.inputMap), nil
+			return result.Merge(r.inputMap), graph, nil
 		}
-		return result, nil
+		return result, graph, nil
 	}
 
 	// Add root package's own exports if requested
@@ -259,6 +279,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	sem := make(chan struct{}, 10) // limit concurrency
+	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
 
 	for depName := range packagesToProcess {
 		wg.Add(1)
@@ -267,7 +288,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			depPath := filepath.Join(workspaceRoot, "node_modules", name)
+			depPath := filepath.Join(nodeModulesPath, name)
 			if !r.fs.Exists(depPath) {
 				if r.logger != nil {
 					r.logger.Warning("Dependency %s not found in node_modules", name)
@@ -275,7 +296,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 				return
 			}
 
-			if err := r.addPackageToImportMap(result, &mu, name, depPath); err != nil {
+			if err := r.addPackageToImportMapWithGraph(result, &mu, name, depPath, graph); err != nil {
 				if r.logger != nil {
 					r.logger.Warning("Failed to add package %s: %v", name, err)
 				}
@@ -285,7 +306,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	wg.Wait()
 
 	// Add scopes for transitive dependencies
-	if err := r.addTransitiveDependencies(result, workspaceRoot, rootPkg); err != nil {
+	if err := r.addTransitiveDependenciesWithGraph(result, workspaceRoot, rootPkg, graph); err != nil {
 		if r.logger != nil {
 			r.logger.Warning("Failed to add transitive dependencies: %v", err)
 		}
@@ -301,13 +322,19 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 		result = result.Merge(r.inputMap)
 	}
 
-	return result, nil
+	return result, graph, nil
 }
 
 // resolveWorkspace generates an import map for a monorepo workspace.
 // Workspace packages are added to global imports, and their dependencies
 // from node_modules are resolved using the template.
 func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error) {
+	im, _, err := r.resolveWorkspaceInternal(rootDir, nil)
+	return im, err
+}
+
+// resolveWorkspaceInternal is the core workspace resolution logic, optionally tracking dependencies.
+func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.DependencyGraph) (*importmap.ImportMap, *resolve.DependencyGraph, error) {
 	result := &importmap.ImportMap{
 		Imports: make(map[string]string),
 		Scopes:  make(map[string]map[string]string),
@@ -317,11 +344,15 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 	workspaceNames := make(map[string]bool)
 	for _, pkg := range r.workspacePackages {
 		workspaceNames[pkg.Name] = true
+		if graph != nil {
+			graph.AddWorkspacePackage(pkg.Name)
+			graph.SetPackagePath(pkg.Name, pkg.Path)
+		}
 	}
 
 	// 1. Add workspace packages to global imports
 	for _, pkg := range r.workspacePackages {
-		if err := r.addWorkspacePackageToImportMap(result, pkg, rootDir); err != nil {
+		if err := r.addWorkspacePackageToImportMapWithGraph(result, pkg, rootDir, graph); err != nil {
 			if r.logger != nil {
 				r.logger.Warning("Failed to add workspace package %s: %v", pkg.Name, err)
 			}
@@ -338,6 +369,9 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 		for depName := range pkgJSON.Dependencies {
 			if !workspaceNames[depName] {
 				allDeps[depName] = true
+				if graph != nil {
+					graph.AddDependency(pkg.Name, depName)
+				}
 			}
 		}
 	}
@@ -370,7 +404,7 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 				}
 				return
 			}
-			if err := r.addPackageToImportMap(result, &mu, name, depPath); err != nil {
+			if err := r.addPackageToImportMapWithGraph(result, &mu, name, depPath, graph); err != nil {
 				if r.logger != nil {
 					r.logger.Warning("Failed to add package %s: %v", name, err)
 				}
@@ -388,7 +422,7 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			r.processPackageDependenciesParallel(result, &mu, &visited, nodeModulesPath, name, rootDir)
+			r.processPackageDependenciesParallelWithGraph(result, &mu, &visited, nodeModulesPath, name, rootDir, graph)
 		}(depName)
 	}
 	wg.Wait()
@@ -403,12 +437,18 @@ func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error
 		result = result.Merge(r.inputMap)
 	}
 
-	return result, nil
+	return result, graph, nil
 }
 
 // addWorkspacePackageToImportMap adds a workspace package's exports to the import map.
 // Unlike node_modules packages, workspace packages use web paths relative to rootDir.
 func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string) error {
+	return r.addWorkspacePackageToImportMapWithGraph(im, pkg, rootDir, nil)
+}
+
+// addWorkspacePackageToImportMapWithGraph adds a workspace package's exports to the import map,
+// optionally tracking in the dependency graph.
+func (r *Resolver) addWorkspacePackageToImportMapWithGraph(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string, graph *resolve.DependencyGraph) error {
 	pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
 	if err != nil {
 		return err
@@ -498,10 +538,21 @@ func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejs
 // addPackageToImportMap adds a package's exports to the import map.
 // It builds entries locally first, then acquires the lock to merge them.
 func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex, pkgName, pkgPath string) error {
+	return r.addPackageToImportMapWithGraph(im, mu, pkgName, pkgPath, nil)
+}
+
+// addPackageToImportMapWithGraph adds a package's exports to the import map,
+// optionally tracking in the dependency graph.
+func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *sync.Mutex, pkgName, pkgPath string, graph *resolve.DependencyGraph) error {
 	pkgJSONPath := filepath.Join(pkgPath, "package.json")
 	pkg, err := r.parsePackageJSON(pkgJSONPath)
 	if err != nil {
 		return err
+	}
+
+	// Track package path in graph
+	if graph != nil {
+		graph.SetPackagePath(pkgName, pkgPath)
 	}
 
 	// Build entries locally
@@ -555,6 +606,12 @@ func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex
 // addTransitiveDependencies adds scopes for packages that have their own dependencies.
 // Uses parallel processing for improved performance on large dependency trees.
 func (r *Resolver) addTransitiveDependencies(im *importmap.ImportMap, rootDir string, rootPkg *packagejson.PackageJSON) error {
+	return r.addTransitiveDependenciesWithGraph(im, rootDir, rootPkg, nil)
+}
+
+// addTransitiveDependenciesWithGraph adds scopes for packages that have their own dependencies,
+// optionally tracking in the dependency graph.
+func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, rootDir string, rootPkg *packagejson.PackageJSON, graph *resolve.DependencyGraph) error {
 	nodeModulesPath := filepath.Join(rootDir, "node_modules")
 
 	var (
@@ -571,7 +628,7 @@ func (r *Resolver) addTransitiveDependencies(im *importmap.ImportMap, rootDir st
 			sem <- struct{}{}        // acquire semaphore
 			defer func() { <-sem }() // release semaphore
 
-			r.processPackageDependenciesParallel(im, &mu, &visited, nodeModulesPath, name, rootDir)
+			r.processPackageDependenciesParallelWithGraph(im, &mu, &visited, nodeModulesPath, name, rootDir, graph)
 		}(depName)
 	}
 
@@ -586,6 +643,18 @@ func (r *Resolver) processPackageDependenciesParallel(
 	mu *sync.Mutex,
 	visited *sync.Map,
 	nodeModulesPath, pkgName, rootDir string,
+) {
+	r.processPackageDependenciesParallelWithGraph(im, mu, visited, nodeModulesPath, pkgName, rootDir, nil)
+}
+
+// processPackageDependenciesParallelWithGraph recursively processes a package's dependencies and adds scopes,
+// optionally tracking in the dependency graph.
+func (r *Resolver) processPackageDependenciesParallelWithGraph(
+	im *importmap.ImportMap,
+	mu *sync.Mutex,
+	visited *sync.Map,
+	nodeModulesPath, pkgName, rootDir string,
+	graph *resolve.DependencyGraph,
 ) {
 	// Check if already visited (atomic)
 	if _, loaded := visited.LoadOrStore(pkgName, true); loaded {
@@ -610,11 +679,21 @@ func (r *Resolver) processPackageDependenciesParallel(
 		scopeKey += "/"
 	}
 
+	// Track scope key in graph
+	if graph != nil {
+		graph.SetScopeKey(pkgName, scopeKey)
+	}
+
 	// Build scope entries locally first to minimize lock time
 	scopeEntries := make(map[string]string)
 	opts := r.resolveOpts()
 
 	for depName := range pkg.Dependencies {
+		// Track dependency relationship in graph
+		if graph != nil {
+			graph.AddDependency(pkgName, depName)
+		}
+
 		depPath := filepath.Join(nodeModulesPath, depName)
 		if !r.fs.Exists(depPath) {
 			continue
@@ -653,7 +732,7 @@ func (r *Resolver) processPackageDependenciesParallel(
 		}
 
 		// Recursively process (will be deduped by visited map)
-		r.processPackageDependenciesParallel(im, mu, visited, nodeModulesPath, depName, rootDir)
+		r.processPackageDependenciesParallelWithGraph(im, mu, visited, nodeModulesPath, depName, rootDir, graph)
 	}
 
 	// Merge scope entries into import map (protected by mutex)
@@ -683,4 +762,173 @@ func parsePackageName(spec string) string {
 		return spec[:idx]
 	}
 	return spec
+}
+
+// ResolveIncremental updates an existing import map based on changed packages.
+// If update.PreviousMap or update.PreviousGraph is nil, falls back to full resolution.
+// Only the changed packages and their dependents are re-resolved.
+func (r *Resolver) ResolveIncremental(rootDir string, update resolve.IncrementalUpdate) (*resolve.IncrementalResult, error) {
+	// Fallback to full resolution if no previous state
+	if update.PreviousMap == nil || update.PreviousGraph == nil || len(update.ChangedPackages) == 0 {
+		return r.ResolveWithGraph(rootDir)
+	}
+
+	// Normalize rootDir
+	absRoot, err := filepath.Abs(rootDir)
+	if err != nil {
+		absRoot = rootDir
+	}
+	rootDir = absRoot
+
+	// Invalidate cache for changed packages
+	if r.cache != nil {
+		for _, pkgName := range update.ChangedPackages {
+			pkgPath := update.PreviousGraph.PackagePath(pkgName)
+			if pkgPath != "" {
+				r.cache.Invalidate(filepath.Join(pkgPath, "package.json"))
+			}
+		}
+	}
+
+	// Compute all affected packages: changed + transitive dependents
+	affected := r.computeAffectedPackages(update.ChangedPackages, update.PreviousGraph)
+
+	// Clone the previous map and graph
+	result := update.PreviousMap.Clone()
+	newGraph := update.PreviousGraph.Clone()
+
+	// Remove affected packages from the map
+	for _, pkgName := range affected {
+		r.removePackageFromMap(result, pkgName, update.PreviousGraph)
+		newGraph.RemovePackage(pkgName)
+	}
+
+	// Re-resolve affected packages
+	nodeModulesPath := filepath.Join(rootDir, "node_modules")
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	sem := make(chan struct{}, 10)
+
+	for _, pkgName := range affected {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Check if this is a workspace package
+			if update.PreviousGraph.IsWorkspacePackage(name) {
+				pkgPath := update.PreviousGraph.PackagePath(name)
+				if pkgPath != "" {
+					pkg := resolve.WorkspacePackage{Name: name, Path: pkgPath}
+					newGraph.AddWorkspacePackage(name)
+					newGraph.SetPackagePath(name, pkgPath)
+					if err := r.addWorkspacePackageToImportMapWithGraph(result, pkg, rootDir, newGraph); err != nil {
+						if r.logger != nil {
+							r.logger.Warning("Failed to re-add workspace package %s: %v", name, err)
+						}
+					}
+				}
+				return
+			}
+
+			// Regular node_modules package
+			depPath := filepath.Join(nodeModulesPath, name)
+			if !r.fs.Exists(depPath) {
+				if r.logger != nil {
+					r.logger.Warning("Dependency %s not found in node_modules", name)
+				}
+				return
+			}
+
+			mu.Lock()
+			if result.Imports == nil {
+				result.Imports = make(map[string]string)
+			}
+			if result.Scopes == nil {
+				result.Scopes = make(map[string]map[string]string)
+			}
+			mu.Unlock()
+
+			if err := r.addPackageToImportMapWithGraph(result, &mu, name, depPath, newGraph); err != nil {
+				if r.logger != nil {
+					r.logger.Warning("Failed to re-add package %s: %v", name, err)
+				}
+			}
+		}(pkgName)
+	}
+	wg.Wait()
+
+	// Re-process transitive dependencies for affected packages
+	visited := sync.Map{}
+	for _, pkgName := range affected {
+		if !update.PreviousGraph.IsWorkspacePackage(pkgName) {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				r.processPackageDependenciesParallelWithGraph(result, &mu, &visited, nodeModulesPath, name, rootDir, newGraph)
+			}(pkgName)
+		}
+	}
+	wg.Wait()
+
+	// Clean up empty scopes
+	if len(result.Scopes) == 0 {
+		result.Scopes = nil
+	}
+
+	// Merge with input map if provided (input map takes precedence)
+	if r.inputMap != nil {
+		result = result.Merge(r.inputMap)
+	}
+
+	return &resolve.IncrementalResult{
+		ImportMap:       result,
+		DependencyGraph: newGraph,
+	}, nil
+}
+
+// computeAffectedPackages returns all packages that need to be re-resolved:
+// the changed packages plus all their transitive dependents.
+func (r *Resolver) computeAffectedPackages(changed []string, graph *resolve.DependencyGraph) []string {
+	affected := make(map[string]bool)
+
+	for _, pkg := range changed {
+		affected[pkg] = true
+		for _, dep := range graph.TransitiveDependents(pkg) {
+			affected[dep] = true
+		}
+	}
+
+	result := make([]string, 0, len(affected))
+	for pkg := range affected {
+		result = append(result, pkg)
+	}
+	return result
+}
+
+// removePackageFromMap removes a package's entries from the import map.
+func (r *Resolver) removePackageFromMap(im *importmap.ImportMap, pkgName string, graph *resolve.DependencyGraph) {
+	if im.Imports != nil {
+		// Remove exact package name entry
+		delete(im.Imports, pkgName)
+		// Remove trailing slash entry
+		delete(im.Imports, pkgName+"/")
+		// Remove subpath entries (e.g., "lit/decorators.js")
+		prefix := pkgName + "/"
+		for key := range im.Imports {
+			if strings.HasPrefix(key, prefix) {
+				delete(im.Imports, key)
+			}
+		}
+	}
+
+	// Remove package's scope
+	scopeKey := graph.ScopeKey(pkgName)
+	if scopeKey != "" && im.Scopes != nil {
+		delete(im.Scopes, scopeKey)
+	}
 }
