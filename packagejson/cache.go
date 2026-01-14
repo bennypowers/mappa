@@ -73,11 +73,12 @@ func (c *MemoryCache) Set(path string, pkg *PackageJSON) {
 	c.cache[path] = pkg
 }
 
-// Invalidate removes a cached entry.
+// Invalidate removes a cached entry and any in-flight loading state.
 func (c *MemoryCache) Invalidate(path string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	delete(c.cache, path)
+	c.mu.Unlock()
+	c.loading.Delete(path)
 }
 
 // GetOrLoad atomically retrieves from cache or loads using the provided function.
@@ -104,6 +105,11 @@ func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)
 			c.mu.Unlock()
 		}
 	})
+
+	// Note: We don't delete from c.loading here because it would race with
+	// concurrent LoadOrStore calls. Entries remain until Invalidate is called.
+	// This is acceptable: entries are small (sync.Once + pointers) and bounded
+	// by unique paths. Invalidate clears both maps for proper cache refresh.
 
 	return entry.pkg, entry.err
 }

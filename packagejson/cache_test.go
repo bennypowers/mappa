@@ -116,9 +116,9 @@ func TestCacheInterface(t *testing.T) {
 func TestMemoryCacheGetOrLoad(t *testing.T) {
 	cache := packagejson.NewMemoryCache()
 
-	loadCount := 0
+	var loadCount atomic.Int32
 	loader := func() (*packagejson.PackageJSON, error) {
-		loadCount++
+		loadCount.Add(1)
 		return &packagejson.PackageJSON{Name: "loaded"}, nil
 	}
 
@@ -130,8 +130,8 @@ func TestMemoryCacheGetOrLoad(t *testing.T) {
 	if pkg.Name != "loaded" {
 		t.Errorf("Expected name 'loaded', got %q", pkg.Name)
 	}
-	if loadCount != 1 {
-		t.Errorf("Expected loader to be called once, called %d times", loadCount)
+	if loadCount.Load() != 1 {
+		t.Errorf("Expected loader to be called once, called %d times", loadCount.Load())
 	}
 
 	// Second call should use cached value, not invoke loader
@@ -142,8 +142,8 @@ func TestMemoryCacheGetOrLoad(t *testing.T) {
 	if pkg.Name != "loaded" {
 		t.Errorf("Expected name 'loaded', got %q", pkg.Name)
 	}
-	if loadCount != 1 {
-		t.Errorf("Expected loader to still be called once, called %d times", loadCount)
+	if loadCount.Load() != 1 {
+		t.Errorf("Expected loader to still be called once, called %d times", loadCount.Load())
 	}
 }
 
@@ -173,5 +173,42 @@ func TestMemoryCacheGetOrLoadConcurrent(t *testing.T) {
 	// Loader should only be called once due to atomic GetOrLoad
 	if loadCount.Load() != 1 {
 		t.Errorf("Expected loader to be called exactly once, called %d times", loadCount.Load())
+	}
+}
+
+func TestMemoryCacheInvalidateAllowsReload(t *testing.T) {
+	cache := packagejson.NewMemoryCache()
+
+	var loadCount atomic.Int32
+	loader := func() (*packagejson.PackageJSON, error) {
+		n := loadCount.Add(1)
+		return &packagejson.PackageJSON{Name: "loaded", Version: string(rune('0' + n))}, nil
+	}
+
+	// First load
+	pkg, err := cache.GetOrLoad("/path/package.json", loader)
+	if err != nil {
+		t.Fatalf("GetOrLoad failed: %v", err)
+	}
+	if pkg.Version != "1" {
+		t.Errorf("Expected version '1', got %q", pkg.Version)
+	}
+	if loadCount.Load() != 1 {
+		t.Errorf("Expected 1 load, got %d", loadCount.Load())
+	}
+
+	// Invalidate
+	cache.Invalidate("/path/package.json")
+
+	// Second load should reload (not use stale entry)
+	pkg, err = cache.GetOrLoad("/path/package.json", loader)
+	if err != nil {
+		t.Fatalf("GetOrLoad failed: %v", err)
+	}
+	if pkg.Version != "2" {
+		t.Errorf("Expected version '2' after invalidate, got %q", pkg.Version)
+	}
+	if loadCount.Load() != 2 {
+		t.Errorf("Expected 2 loads after invalidate, got %d", loadCount.Load())
 	}
 }
