@@ -28,6 +28,16 @@ import (
 // ErrNotExported is returned when a subpath is not exported by the package.
 var ErrNotExported = errors.New("not exported by package.json")
 
+// DefaultConditions is the default export condition priority for browser environments.
+var DefaultConditions = []string{"browser", "import", "default"}
+
+// ResolveOptions configures how conditional exports are resolved.
+type ResolveOptions struct {
+	// Conditions is the ordered list of conditions to try when resolving exports.
+	// If nil, defaults to DefaultConditions.
+	Conditions []string
+}
+
 // PackageJSON represents the subset of package.json relevant for import maps.
 type PackageJSON struct {
 	Name            string            `json:"name"`
@@ -74,7 +84,8 @@ func ParseFile(fs fs.FileSystem, path string) (*PackageJSON, error) {
 // ResolveExport resolves a subpath export to its target file path.
 // The subpath should be "." for the main export or "./subpath" for subpath exports.
 // Returns the resolved path without leading "./".
-func (pkg *PackageJSON) ResolveExport(subpath string) (string, error) {
+// Pass nil for opts to use DefaultConditions.
+func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (string, error) {
 	if pkg.Exports == nil {
 		// Fall back to main field
 		if pkg.Main != "" {
@@ -112,7 +123,7 @@ func (pkg *PackageJSON) ResolveExport(subpath string) (string, error) {
 	if !hasSubpaths {
 		// This is a condition-only export for the main entry
 		if subpath == "." {
-			return resolveConditions(exportsMap)
+			return resolveConditionsWithOpts(exportsMap, opts)
 		}
 		return "", ErrNotExported
 	}
@@ -123,11 +134,12 @@ func (pkg *PackageJSON) ResolveExport(subpath string) (string, error) {
 		return "", ErrNotExported
 	}
 
-	return resolveExportValue(exportValue)
+	return resolveExportValueWithOpts(exportValue, opts)
 }
 
 // ExportEntries returns all non-wildcard export entries from the package.
-func (pkg *PackageJSON) ExportEntries() []ExportEntry {
+// Pass nil for opts to use DefaultConditions.
+func (pkg *PackageJSON) ExportEntries(opts *ResolveOptions) []ExportEntry {
 	var entries []ExportEntry
 
 	if pkg.Exports == nil {
@@ -167,7 +179,7 @@ func (pkg *PackageJSON) ExportEntries() []ExportEntry {
 
 	if !hasSubpaths {
 		// Condition-only export for main entry
-		if resolved, err := resolveConditions(exportsMap); err == nil {
+		if resolved, err := resolveConditionsWithOpts(exportsMap, opts); err == nil {
 			entries = append(entries, ExportEntry{
 				Subpath: ".",
 				Target:  resolved,
@@ -183,7 +195,7 @@ func (pkg *PackageJSON) ExportEntries() []ExportEntry {
 			continue
 		}
 
-		resolved, err := resolveExportValue(exportValue)
+		resolved, err := resolveExportValueWithOpts(exportValue, opts)
 		if err != nil {
 			continue
 		}
@@ -198,7 +210,8 @@ func (pkg *PackageJSON) ExportEntries() []ExportEntry {
 }
 
 // WildcardExports returns all wildcard export patterns from the package.
-func (pkg *PackageJSON) WildcardExports() []WildcardExport {
+// Pass nil for opts to use DefaultConditions.
+func (pkg *PackageJSON) WildcardExports(opts *ResolveOptions) []WildcardExport {
 	var wildcards []WildcardExport
 
 	exportsMap, ok := pkg.Exports.(map[string]any)
@@ -212,7 +225,7 @@ func (pkg *PackageJSON) WildcardExports() []WildcardExport {
 		}
 
 		// Resolve the target value (handles strings, conditions, and arrays)
-		targetStr := resolveWildcardTarget(targetValue)
+		targetStr := resolveWildcardTargetWithOpts(targetValue, opts)
 		if targetStr == "" || !strings.Contains(targetStr, "*") {
 			continue
 		}
@@ -231,21 +244,21 @@ func (pkg *PackageJSON) WildcardExports() []WildcardExport {
 	return wildcards
 }
 
-// resolveWildcardTarget resolves a wildcard export value to its target string.
+// resolveWildcardTargetWithOpts resolves a wildcard export value with custom conditions.
 // Handles plain strings, conditional exports (maps), and fallback arrays.
-func resolveWildcardTarget(value any) string {
+func resolveWildcardTargetWithOpts(value any, opts *ResolveOptions) string {
 	switch v := value.(type) {
 	case string:
 		return v
 	case map[string]any:
-		// Conditional export - try to resolve using same priority as resolveConditions
-		if result, err := resolveConditions(v); err == nil {
+		// Conditional export - try to resolve using configured conditions
+		if result, err := resolveConditionsWithOpts(v, opts); err == nil {
 			return result
 		}
 	case []any:
 		// Fallback array - return first valid wildcard target
 		for _, item := range v {
-			if result := resolveWildcardTarget(item); result != "" {
+			if result := resolveWildcardTargetWithOpts(item, opts); result != "" {
 				return result
 			}
 		}
@@ -254,8 +267,9 @@ func resolveWildcardTarget(value any) string {
 }
 
 // HasTrailingSlashExport returns true if the package should have a trailing slash import.
-func (pkg *PackageJSON) HasTrailingSlashExport() bool {
-	if len(pkg.WildcardExports()) > 0 {
+// Pass nil for opts to use DefaultConditions.
+func (pkg *PackageJSON) HasTrailingSlashExport(opts *ResolveOptions) bool {
+	if len(pkg.WildcardExports(opts)) > 0 {
 		return true
 	}
 	if pkg.Exports == nil {
@@ -264,50 +278,34 @@ func (pkg *PackageJSON) HasTrailingSlashExport() bool {
 	return false
 }
 
-// resolveExportValue resolves an export value (string or condition map) to a path.
-func resolveExportValue(value any) (string, error) {
+// resolveExportValueWithOpts resolves an export value with custom conditions.
+func resolveExportValueWithOpts(value any, opts *ResolveOptions) (string, error) {
 	switch v := value.(type) {
 	case string:
 		return trimDotSlash(v), nil
 	case map[string]any:
-		return resolveConditions(v)
+		return resolveConditionsWithOpts(v, opts)
 	}
 	return "", ErrNotExported
 }
 
-// resolveConditions resolves a conditional export map to a path.
-// Priority: browser.import > browser.default > import > default
-func resolveConditions(conditions map[string]any) (string, error) {
-	// Check browser condition first
-	if browserValue, ok := conditions["browser"]; ok {
-		if browserMap, ok := browserValue.(map[string]any); ok {
-			if result, err := resolveConditions(browserMap); err == nil {
-				return result, nil
-			}
-		} else if browserStr, ok := browserValue.(string); ok {
-			return trimDotSlash(browserStr), nil
-		}
+// resolveConditionsWithOpts resolves a conditional export map to a path.
+// Tries each condition in opts.Conditions order, recursing into nested maps.
+func resolveConditionsWithOpts(conditions map[string]any, opts *ResolveOptions) (string, error) {
+	conditionList := DefaultConditions
+	if opts != nil && len(opts.Conditions) > 0 {
+		conditionList = opts.Conditions
 	}
 
-	// Check import condition
-	if importValue, ok := conditions["import"]; ok {
-		if importMap, ok := importValue.(map[string]any); ok {
-			if result, err := resolveConditions(importMap); err == nil {
-				return result, nil
+	for _, cond := range conditionList {
+		if value, ok := conditions[cond]; ok {
+			if valueMap, ok := value.(map[string]any); ok {
+				if result, err := resolveConditionsWithOpts(valueMap, opts); err == nil {
+					return result, nil
+				}
+			} else if valueStr, ok := value.(string); ok {
+				return trimDotSlash(valueStr), nil
 			}
-		} else if importStr, ok := importValue.(string); ok {
-			return trimDotSlash(importStr), nil
-		}
-	}
-
-	// Check default condition
-	if defaultValue, ok := conditions["default"]; ok {
-		if defaultMap, ok := defaultValue.(map[string]any); ok {
-			if result, err := resolveConditions(defaultMap); err == nil {
-				return result, nil
-			}
-		} else if defaultStr, ok := defaultValue.(string); ok {
-			return trimDotSlash(defaultStr), nil
 		}
 	}
 

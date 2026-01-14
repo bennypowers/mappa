@@ -89,14 +89,16 @@ func init() {
 	generateCmd.Flags().String("input-map", "", "Import map file to merge with generated output")
 	generateCmd.Flags().StringArray("include-package", nil, "Additional packages to include (can be repeated)")
 	generateCmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
+	generateCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 
 	// Bind flags to viper
-	viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
-	viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
-	viper.BindPFlag("format", generateCmd.Flags().Lookup("format"))
-	viper.BindPFlag("input-map", generateCmd.Flags().Lookup("input-map"))
-	viper.BindPFlag("include-package", generateCmd.Flags().Lookup("include-package"))
-	viper.BindPFlag("template", generateCmd.Flags().Lookup("template"))
+	_ = viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
+	_ = viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
+	_ = viper.BindPFlag("format", generateCmd.Flags().Lookup("format"))
+	_ = viper.BindPFlag("input-map", generateCmd.Flags().Lookup("input-map"))
+	_ = viper.BindPFlag("include-package", generateCmd.Flags().Lookup("include-package"))
+	_ = viper.BindPFlag("template", generateCmd.Flags().Lookup("template"))
+	_ = viper.BindPFlag("conditions", generateCmd.Flags().Lookup("conditions"))
 
 	// Add commands
 	rootCmd.AddCommand(generateCmd)
@@ -122,7 +124,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	// Parse input map if provided
 	var inputMap *importmap.ImportMap
 	if inputMapPath := viper.GetString("input-map"); inputMapPath != "" {
-		inputMapData, err := os.ReadFile(inputMapPath)
+		inputMapData, err := osfs.ReadFile(inputMapPath)
 		if err != nil {
 			return fmt.Errorf("failed to read input map: %w", err)
 		}
@@ -150,6 +152,9 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	if inputMap != nil {
 		resolver = resolver.WithInputMap(inputMap)
 	}
+	if conditions := viper.GetStringSlice("conditions"); len(conditions) > 0 {
+		resolver = resolver.WithConditions(conditions)
+	}
 
 	generatedMap, err := resolver.Resolve(absRoot)
 	if err != nil {
@@ -176,7 +181,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 
 	if output := viper.GetString("output"); output != "" {
-		return os.WriteFile(output, []byte(jsonOutput+"\n"), 0644)
+		return osfs.WriteFile(output, []byte(jsonOutput+"\n"), 0644)
 	}
 	fmt.Println(jsonOutput)
 	return nil
@@ -221,7 +226,7 @@ func runTrace(cmd *cobra.Command, args []string) error {
 	out, _ := json.MarshalIndent(result, "", "  ")
 
 	if output := viper.GetString("output"); output != "" {
-		return os.WriteFile(output, append(out, '\n'), 0644)
+		return osfs.WriteFile(output, append(out, '\n'), 0644)
 	}
 	fmt.Println(string(out))
 	return nil

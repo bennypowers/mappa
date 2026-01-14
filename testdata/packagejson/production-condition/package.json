@@ -1,0 +1,12 @@
+{
+  "name": "prod-pkg",
+  "version": "1.0.0",
+  "exports": {
+    ".": {
+      "production": "./dist/prod.js",
+      "development": "./dist/dev.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/index.js"
+    }
+  }
+}

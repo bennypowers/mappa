@@ -39,6 +39,7 @@ type Resolver struct {
 	workspacePackages  []resolve.WorkspacePackage
 	includeRootExports bool
 	cache              packagejson.Cache
+	conditions         []string // export condition priority
 }
 
 // New creates a new local Resolver.
@@ -64,6 +65,7 @@ func (r *Resolver) WithPackages(packages []string) *Resolver {
 		workspacePackages:  r.workspacePackages,
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
+		conditions:         r.conditions,
 	}
 }
 
@@ -82,6 +84,7 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 		workspacePackages:  r.workspacePackages,
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
+		conditions:         r.conditions,
 	}, nil
 }
 
@@ -97,6 +100,7 @@ func (r *Resolver) WithInputMap(im *importmap.ImportMap) *Resolver {
 		workspacePackages:  r.workspacePackages,
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
+		conditions:         r.conditions,
 	}
 }
 
@@ -113,6 +117,7 @@ func (r *Resolver) WithWorkspacePackages(packages []resolve.WorkspacePackage) *R
 		workspacePackages:  packages,
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
+		conditions:         r.conditions,
 	}
 }
 
@@ -129,6 +134,7 @@ func (r *Resolver) WithIncludeRootExports() *Resolver {
 		workspacePackages:  r.workspacePackages,
 		includeRootExports: true,
 		cache:              r.cache,
+		conditions:         r.conditions,
 	}
 }
 
@@ -146,7 +152,33 @@ func (r *Resolver) WithPackageCache(cache packagejson.Cache) *Resolver {
 		workspacePackages:  r.workspacePackages,
 		includeRootExports: r.includeRootExports,
 		cache:              cache,
+		conditions:         r.conditions,
 	}
+}
+
+// WithConditions returns a new Resolver that uses the specified export
+// condition priority when resolving package.json exports.
+// Example: []string{"production", "browser", "import", "default"}
+func (r *Resolver) WithConditions(conditions []string) *Resolver {
+	return &Resolver{
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
+		conditions:         conditions,
+	}
+}
+
+// resolveOpts returns ResolveOptions for the configured conditions.
+func (r *Resolver) resolveOpts() *packagejson.ResolveOptions {
+	if len(r.conditions) == 0 {
+		return nil
+	}
+	return &packagejson.ResolveOptions{Conditions: r.conditions}
 }
 
 // parsePackageJSON parses a package.json file, using the cache if available.
@@ -196,7 +228,7 @@ func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	// Add root package's own exports if requested
 	// This is useful for dev servers where you want to import the package by name
 	if r.includeRootExports && rootPkg.Name != "" {
-		if err := r.addRootPackageExports(result, rootPkg, rootDir); err != nil {
+		if err := r.addRootPackageExports(result, rootPkg); err != nil {
 			if r.logger != nil {
 				r.logger.Warning("Failed to add root package exports: %v", err)
 			}
@@ -377,7 +409,8 @@ func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg r
 	webPath := resolve.ToWebPath(rootDir, pkg.Path)
 
 	// Get all export entries
-	entries := pkgJSON.ExportEntries()
+	opts := r.resolveOpts()
+	entries := pkgJSON.ExportEntries(opts)
 	for _, entry := range entries {
 		var importKey string
 		if entry.Subpath == "." {
@@ -391,7 +424,7 @@ func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg r
 	}
 
 	// Handle wildcard exports (trailing slash imports)
-	wildcards := pkgJSON.WildcardExports()
+	wildcards := pkgJSON.WildcardExports(opts)
 	for _, w := range wildcards {
 		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
 		importKey := pkg.Name + "/" + patternPrefix
@@ -405,7 +438,7 @@ func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg r
 	}
 
 	// Add trailing slash for packages that support it
-	if pkgJSON.HasTrailingSlashExport() && len(wildcards) == 0 {
+	if pkgJSON.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
 		im.Imports[pkg.Name+"/"] = webPath + "/"
 	}
 
@@ -414,9 +447,10 @@ func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg r
 
 // addRootPackageExports adds the root package's own exports to the import map.
 // This allows importing the package by name in development (e.g., import { x } from 'my-lib').
-func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejson.PackageJSON, rootDir string) error {
+func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejson.PackageJSON) error {
 	// Get all export entries
-	entries := pkg.ExportEntries()
+	opts := r.resolveOpts()
+	entries := pkg.ExportEntries(opts)
 	for _, entry := range entries {
 		var importKey string
 		if entry.Subpath == "." {
@@ -431,7 +465,7 @@ func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejs
 	}
 
 	// Handle wildcard exports
-	wildcards := pkg.WildcardExports()
+	wildcards := pkg.WildcardExports(opts)
 	for _, w := range wildcards {
 		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
 		importKey := pkg.Name + "/" + patternPrefix
@@ -445,7 +479,7 @@ func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejs
 	}
 
 	// Add trailing slash for packages that support it
-	if pkg.HasTrailingSlashExport() && len(wildcards) == 0 {
+	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
 		im.Imports[pkg.Name+"/"] = "/"
 	}
 
@@ -463,8 +497,9 @@ func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex
 
 	// Build entries locally
 	imports := make(map[string]string)
+	opts := r.resolveOpts()
 
-	entries := pkg.ExportEntries()
+	entries := pkg.ExportEntries(opts)
 	for _, entry := range entries {
 		var importKey string
 		if entry.Subpath == "." {
@@ -476,7 +511,7 @@ func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex
 		imports[importKey] = r.template.Expand(pkgName, "", entry.Target)
 	}
 
-	wildcards := pkg.WildcardExports()
+	wildcards := pkg.WildcardExports(opts)
 	for _, w := range wildcards {
 		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
 		importKey := pkgName + "/" + patternPrefix
@@ -496,7 +531,7 @@ func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex
 	}
 
 	// Add trailing slash for packages that support it
-	if pkg.HasTrailingSlashExport() && len(wildcards) == 0 {
+	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
 		imports[pkgName+"/"] = r.template.Expand(pkgName, "", "")
 	}
 
@@ -568,6 +603,7 @@ func (r *Resolver) processPackageDependenciesParallel(
 
 	// Build scope entries locally first to minimize lock time
 	scopeEntries := make(map[string]string)
+	opts := r.resolveOpts()
 
 	for depName := range pkg.Dependencies {
 		depPath := filepath.Join(nodeModulesPath, depName)
@@ -582,7 +618,7 @@ func (r *Resolver) processPackageDependenciesParallel(
 		}
 
 		// Add all export entries for this dependency
-		entries := depPkg.ExportEntries()
+		entries := depPkg.ExportEntries(opts)
 		for _, entry := range entries {
 			var importKey string
 			if entry.Subpath == "." {
@@ -595,7 +631,7 @@ func (r *Resolver) processPackageDependenciesParallel(
 		}
 
 		// Handle wildcard exports (trailing slash imports)
-		wildcards := depPkg.WildcardExports()
+		wildcards := depPkg.WildcardExports(opts)
 		for _, w := range wildcards {
 			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
 			importKey := depName + "/" + patternPrefix
