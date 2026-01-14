@@ -92,13 +92,13 @@ func init() {
 	generateCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 
 	// Bind flags to viper
-	viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
-	viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
-	viper.BindPFlag("format", generateCmd.Flags().Lookup("format"))
-	viper.BindPFlag("input-map", generateCmd.Flags().Lookup("input-map"))
-	viper.BindPFlag("include-package", generateCmd.Flags().Lookup("include-package"))
-	viper.BindPFlag("template", generateCmd.Flags().Lookup("template"))
-	viper.BindPFlag("conditions", generateCmd.Flags().Lookup("conditions"))
+	_ = viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
+	_ = viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
+	_ = viper.BindPFlag("format", generateCmd.Flags().Lookup("format"))
+	_ = viper.BindPFlag("input-map", generateCmd.Flags().Lookup("input-map"))
+	_ = viper.BindPFlag("include-package", generateCmd.Flags().Lookup("include-package"))
+	_ = viper.BindPFlag("template", generateCmd.Flags().Lookup("template"))
+	_ = viper.BindPFlag("conditions", generateCmd.Flags().Lookup("conditions"))
 
 	// Add commands
 	rootCmd.AddCommand(generateCmd)
