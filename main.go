@@ -89,6 +89,7 @@ func init() {
 	generateCmd.Flags().String("input-map", "", "Import map file to merge with generated output")
 	generateCmd.Flags().StringArray("include-package", nil, "Additional packages to include (can be repeated)")
 	generateCmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
+	generateCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 
 	// Bind flags to viper
 	viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
@@ -97,6 +98,7 @@ func init() {
 	viper.BindPFlag("input-map", generateCmd.Flags().Lookup("input-map"))
 	viper.BindPFlag("include-package", generateCmd.Flags().Lookup("include-package"))
 	viper.BindPFlag("template", generateCmd.Flags().Lookup("template"))
+	viper.BindPFlag("conditions", generateCmd.Flags().Lookup("conditions"))
 
 	// Add commands
 	rootCmd.AddCommand(generateCmd)
@@ -149,6 +151,9 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 	if inputMap != nil {
 		resolver = resolver.WithInputMap(inputMap)
+	}
+	if conditions := viper.GetStringSlice("conditions"); len(conditions) > 0 {
+		resolver = resolver.WithConditions(conditions)
 	}
 
 	generatedMap, err := resolver.Resolve(absRoot)

@@ -76,7 +76,7 @@ func TestResolveExport(t *testing.T) {
 			t.Fatalf("Failed to parse expected.json: %v", err)
 		}
 
-		resolved, err := pkg.ResolveExport(".")
+		resolved, err := pkg.ResolveExport(".", nil)
 		if err != nil {
 			t.Fatalf("ResolveExport failed: %v", err)
 		}
@@ -106,7 +106,7 @@ func TestResolveExport(t *testing.T) {
 		}
 
 		for subpath, expectedResolved := range expected.Exports {
-			resolved, err := pkg.ResolveExport(subpath)
+			resolved, err := pkg.ResolveExport(subpath, nil)
 			if err != nil {
 				t.Errorf("ResolveExport(%q) failed: %v", subpath, err)
 				continue
@@ -137,7 +137,7 @@ func TestResolveExport(t *testing.T) {
 			t.Fatalf("Failed to parse expected.json: %v", err)
 		}
 
-		resolved, err := pkg.ResolveExport(".")
+		resolved, err := pkg.ResolveExport(".", nil)
 		if err != nil {
 			t.Fatalf("ResolveExport failed: %v", err)
 		}
@@ -166,7 +166,7 @@ func TestResolveExport(t *testing.T) {
 			t.Fatalf("Failed to parse expected.json: %v", err)
 		}
 
-		resolved, err := pkg.ResolveExport(".")
+		resolved, err := pkg.ResolveExport(".", nil)
 		if err != nil {
 			t.Fatalf("ResolveExport failed: %v", err)
 		}
@@ -195,7 +195,7 @@ func TestResolveExport(t *testing.T) {
 			t.Fatalf("Failed to parse expected.json: %v", err)
 		}
 
-		resolved, err := pkg.ResolveExport(".")
+		resolved, err := pkg.ResolveExport(".", nil)
 		if err != nil {
 			t.Fatalf("ResolveExport failed: %v", err)
 		}
@@ -226,7 +226,7 @@ func TestExportEntries(t *testing.T) {
 			t.Fatalf("Failed to parse expected.json: %v", err)
 		}
 
-		entries := pkg.ExportEntries()
+		entries := pkg.ExportEntries(nil)
 		if len(entries) != len(expected.Exports) {
 			t.Errorf("Expected %d export entries, got %d", len(expected.Exports), len(entries))
 		}
@@ -267,7 +267,7 @@ func TestWildcardExports(t *testing.T) {
 		t.Fatalf("Failed to parse expected.json: %v", err)
 	}
 
-	wildcards := pkg.WildcardExports()
+	wildcards := pkg.WildcardExports(nil)
 	if len(wildcards) != 1 {
 		t.Fatalf("Expected 1 wildcard export, got %d", len(wildcards))
 	}
@@ -302,9 +302,75 @@ func TestHasTrailingSlashExport(t *testing.T) {
 				t.Fatalf("ParseFile failed: %v", err)
 			}
 
-			if pkg.HasTrailingSlashExport() != tt.expected {
-				t.Errorf("HasTrailingSlashExport() = %v, want %v", pkg.HasTrailingSlashExport(), tt.expected)
+			if pkg.HasTrailingSlashExport(nil) != tt.expected {
+				t.Errorf("HasTrailingSlashExport() = %v, want %v", pkg.HasTrailingSlashExport(nil), tt.expected)
 			}
 		})
+	}
+}
+
+func TestCustomConditions(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/production-condition", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		conditions []string
+		expected   string
+	}{
+		{"default conditions", nil, "dist/browser.js"},
+		{"production first", []string{"production", "browser", "default"}, "dist/prod.js"},
+		{"development first", []string{"development", "browser", "default"}, "dist/dev.js"},
+		{"browser first", []string{"browser", "production", "default"}, "dist/browser.js"},
+		{"default only", []string{"default"}, "dist/index.js"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts *packagejson.ResolveOptions
+			if tt.conditions != nil {
+				opts = &packagejson.ResolveOptions{Conditions: tt.conditions}
+			}
+
+			resolved, err := pkg.ResolveExport(".", opts)
+			if err != nil {
+				t.Fatalf("ResolveExport failed: %v", err)
+			}
+			if resolved != tt.expected {
+				t.Errorf("ResolveExport(\".\", %v) = %q, want %q", tt.conditions, resolved, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExportEntriesWithConditions(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/production-condition", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	// With default conditions (browser first)
+	entriesDefault := pkg.ExportEntries(nil)
+	if len(entriesDefault) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entriesDefault))
+	}
+	if entriesDefault[0].Target != "dist/browser.js" {
+		t.Errorf("Default conditions: expected dist/browser.js, got %s", entriesDefault[0].Target)
+	}
+
+	// With production conditions
+	opts := &packagejson.ResolveOptions{Conditions: []string{"production", "default"}}
+	entriesProd := pkg.ExportEntries(opts)
+	if len(entriesProd) != 1 {
+		t.Fatalf("Expected 1 entry, got %d", len(entriesProd))
+	}
+	if entriesProd[0].Target != "dist/prod.js" {
+		t.Errorf("Production conditions: expected dist/prod.js, got %s", entriesProd[0].Target)
 	}
 }
