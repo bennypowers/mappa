@@ -46,15 +46,25 @@ type ResolveOptions struct {
 
 // PackageJSON represents the subset of package.json relevant for import maps.
 type PackageJSON struct {
-	Name            string            `json:"name"`
-	Version         string            `json:"version"`
-	Main            string            `json:"main,omitempty"`
-	Module          string            `json:"module,omitempty"`
-	Exports         any               `json:"exports,omitempty"`
-	Imports         any               `json:"imports,omitempty"`
-	Dependencies    map[string]string `json:"dependencies,omitempty"`
+	// Name is the package name (e.g., "lit", "@scope/pkg").
+	Name string `json:"name"`
+	// Version is the package version (e.g., "1.0.0").
+	Version string `json:"version"`
+	// Main is the legacy main entry point (e.g., "index.js").
+	Main string `json:"main,omitempty"`
+	// Module is the ESM entry point (e.g., "dist/index.mjs").
+	Module string `json:"module,omitempty"`
+	// Exports defines the package's export map. Can be a string, map, or array.
+	Exports any `json:"exports,omitempty"`
+	// Imports defines the package's import map for internal subpath imports.
+	Imports any `json:"imports,omitempty"`
+	// Dependencies maps package names to version specifiers.
+	Dependencies map[string]string `json:"dependencies,omitempty"`
+	// DevDependencies maps dev package names to version specifiers.
 	DevDependencies map[string]string `json:"devDependencies,omitempty"`
-	RawWorkspaces   json.RawMessage   `json:"workspaces,omitempty"`
+	// RawWorkspaces holds the raw JSON for the workspaces field.
+	// Use WorkspacePatterns() to extract the patterns.
+	RawWorkspaces json.RawMessage `json:"workspaces,omitempty"`
 }
 
 // WorkspacePatterns returns the workspace glob patterns from the workspaces field.
