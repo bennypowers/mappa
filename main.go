@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/spf13/cobra"
@@ -35,11 +36,35 @@ import (
 	"bennypowers.dev/mappa/trace"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "mappa",
-	Short: "Generate and work with ES module import maps",
-	Long:  `mappa generates ES module import maps from package.json dependencies.`,
-}
+var (
+	cpuprofileFile *os.File
+	rootCmd        = &cobra.Command{
+		Use:   "mappa",
+		Short: "Generate and work with ES module import maps",
+		Long:  `mappa generates ES module import maps from package.json dependencies.`,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if cpuprofile != "" {
+				f, err := os.Create(cpuprofile)
+				if err != nil {
+					return fmt.Errorf("could not create CPU profile: %w", err)
+				}
+				cpuprofileFile = f
+				if err := pprof.StartCPUProfile(f); err != nil {
+					f.Close()
+					return fmt.Errorf("could not start CPU profile: %w", err)
+				}
+			}
+			return nil
+		},
+		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+			if cpuprofileFile != nil {
+				pprof.StopCPUProfile()
+				cpuprofileFile.Close()
+			}
+			return nil
+		},
+	}
+)
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
@@ -99,10 +124,13 @@ var versionCmd = &cobra.Command{
 	RunE:  runVersion,
 }
 
+var cpuprofile string
+
 func init() {
 	// Root flags (persistent across all commands)
 	rootCmd.PersistentFlags().StringP("package", "p", ".", "Package directory")
 	rootCmd.PersistentFlags().StringP("output", "o", "", "Output file (default: stdout)")
+	rootCmd.PersistentFlags().StringVar(&cpuprofile, "cpuprofile", "", "Write CPU profile to file")
 
 	// Generate command flags
 	generateCmd.Flags().StringP("format", "f", "json", "Output format (json, html)")

@@ -126,7 +126,8 @@ func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*S
 		templateArg = resolve.DefaultLocalTemplate
 	}
 
-	resolver := local.New(osfs, nil).WithPackages(bareSpecs)
+	pkgCache := packagejson.NewMemoryCache()
+	resolver := local.New(osfs, nil).WithPackageCache(pkgCache).WithPackages(bareSpecs)
 	resolver, err = resolver.WithTemplate(templateArg)
 	if err != nil {
 		return nil, err
@@ -267,8 +268,9 @@ func TraceBatch(osfs fs.FileSystem, files []string, absRoot string, opts Options
 			tracer = tracer.WithSelfPackage(pkg, absRoot)
 		}
 
-		// Create shared base resolver with template and conditions
-		baseResolver := local.New(osfs, nil)
+		// Create shared base resolver with template, conditions, and package cache
+		pkgCache := packagejson.NewMemoryCache()
+		baseResolver := local.New(osfs, nil).WithPackageCache(pkgCache)
 		baseResolver, err := baseResolver.WithTemplate(templateArg)
 		if err != nil {
 			for _, file := range files {
