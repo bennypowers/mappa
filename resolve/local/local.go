@@ -488,10 +488,10 @@ func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex
 		imports[pkgName] = r.template.Expand(pkgName, "", strings.TrimPrefix(pkg.Main, "./"))
 	}
 
-	// Warn if package has no exports and no main - bare specifier won't work
-	if len(entries) == 0 && pkg.Main == "" {
+	// Warn if bare specifier won't work (no root export and no main fallback)
+	if _, ok := imports[pkgName]; !ok {
 		if r.logger != nil {
-			r.logger.Warning("Package '%s' has no exports or main field, only subpath imports will work", pkgName)
+			r.logger.Warning("Package '%s' has no root export or main field; only subpath imports will work", pkgName)
 		}
 	}
 

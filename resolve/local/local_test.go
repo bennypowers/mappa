@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 
 	"bennypowers.dev/mappa/importmap"
@@ -33,15 +34,20 @@ import (
 
 // mockLogger captures log messages for testing
 type mockLogger struct {
+	mu       sync.Mutex
 	warnings []string
 	debugs   []string
 }
 
 func (m *mockLogger) Warning(format string, args ...any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.warnings = append(m.warnings, fmt.Sprintf(format, args...))
 }
 
 func (m *mockLogger) Debug(format string, args ...any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.debugs = append(m.debugs, fmt.Sprintf(format, args...))
 }
 
@@ -257,7 +263,7 @@ func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
 	}
 
 	// Should have logged a warning
-	expectedWarning := "Package 'broken-lib' has no exports or main field, only subpath imports will work"
+	expectedWarning := "Package 'broken-lib' has no root export or main field; only subpath imports will work"
 	if !slices.Contains(logger.warnings, expectedWarning) {
 		t.Errorf("Expected warning %q, got warnings: %v", expectedWarning, logger.warnings)
 	}
