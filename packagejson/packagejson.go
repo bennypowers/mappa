@@ -25,6 +25,12 @@ import (
 	"bennypowers.dev/mappa/fs"
 )
 
+// workspacesObjectFormat represents the object format for workspaces field.
+// Used by yarn classic with nohoist: {"packages": [...], "nohoist": [...]}
+type workspacesObjectFormat struct {
+	Packages []string `json:"packages"`
+}
+
 // ErrNotExported is returned when a subpath is not exported by the package.
 var ErrNotExported = errors.New("not exported by package.json")
 
@@ -40,15 +46,52 @@ type ResolveOptions struct {
 
 // PackageJSON represents the subset of package.json relevant for import maps.
 type PackageJSON struct {
-	Name            string            `json:"name"`
-	Version         string            `json:"version"`
-	Main            string            `json:"main,omitempty"`
-	Module          string            `json:"module,omitempty"`
-	Exports         any               `json:"exports,omitempty"`
-	Imports         any               `json:"imports,omitempty"`
-	Dependencies    map[string]string `json:"dependencies,omitempty"`
+	// Name is the package name (e.g., "lit", "@scope/pkg").
+	Name string `json:"name"`
+	// Version is the package version (e.g., "1.0.0").
+	Version string `json:"version"`
+	// Main is the legacy main entry point (e.g., "index.js").
+	Main string `json:"main,omitempty"`
+	// Module is the ESM entry point (e.g., "dist/index.mjs").
+	Module string `json:"module,omitempty"`
+	// Exports defines the package's export map. Can be a string, map, or array.
+	Exports any `json:"exports,omitempty"`
+	// Imports defines the package's import map for internal subpath imports.
+	Imports any `json:"imports,omitempty"`
+	// Dependencies maps package names to version specifiers.
+	Dependencies map[string]string `json:"dependencies,omitempty"`
+	// DevDependencies maps dev package names to version specifiers.
 	DevDependencies map[string]string `json:"devDependencies,omitempty"`
-	Workspaces      []string          `json:"workspaces,omitempty"`
+	// RawWorkspaces holds the raw JSON for the workspaces field.
+	// Use WorkspacePatterns() to extract the patterns.
+	RawWorkspaces json.RawMessage `json:"workspaces,omitempty"`
+}
+
+// WorkspacePatterns returns the workspace glob patterns from the workspaces field.
+// Handles both array format ["packages/*"] and object format {"packages": ["libs/*"]}.
+func (pkg *PackageJSON) WorkspacePatterns() []string {
+	if len(pkg.RawWorkspaces) == 0 {
+		return nil
+	}
+
+	// Try array format first (most common)
+	var patterns []string
+	if err := json.Unmarshal(pkg.RawWorkspaces, &patterns); err == nil {
+		return patterns
+	}
+
+	// Try object format with "packages" key (yarn classic with nohoist)
+	var obj workspacesObjectFormat
+	if err := json.Unmarshal(pkg.RawWorkspaces, &obj); err == nil {
+		return obj.Packages
+	}
+
+	return nil
+}
+
+// HasWorkspaces returns true if the package has workspace patterns defined.
+func (pkg *PackageJSON) HasWorkspaces() bool {
+	return len(pkg.WorkspacePatterns()) > 0
 }
 
 // ExportEntry represents a single export from a package.
