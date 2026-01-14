@@ -217,4 +217,5 @@ type ScriptTag struct {
 type ModuleImport struct {
 	Specifier string // The import specifier (e.g., "lit", "./foo.js")
 	IsDynamic bool   // True if this is a dynamic import()
+	Line      int    // 1-indexed line number of the specifier
 }

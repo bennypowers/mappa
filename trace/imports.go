@@ -59,22 +59,26 @@ func ExtractImports(content []byte) ([]ModuleImport, error) {
 		for _, capture := range match.Captures {
 			name := captureNames[capture.Index]
 			text := capture.Node.Utf8Text(content)
+			line := int(capture.Node.StartPosition().Row) + 1 // 1-indexed
 
 			switch name {
 			case "import.spec":
 				imports = append(imports, ModuleImport{
 					Specifier: text,
 					IsDynamic: false,
+					Line:      line,
 				})
 			case "dynamicImport.spec":
 				imports = append(imports, ModuleImport{
 					Specifier: text,
 					IsDynamic: true,
+					Line:      line,
 				})
 			case "reexport.spec":
 				imports = append(imports, ModuleImport{
 					Specifier: text,
 					IsDynamic: false,
+					Line:      line,
 				})
 			}
 		}

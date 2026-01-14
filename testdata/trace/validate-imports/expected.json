@@ -1,0 +1,25 @@
+{
+  "issues": [
+    {
+      "file": "/test/module.js",
+      "line": 5,
+      "specifier": "lit-html/directives/if-defined.js",
+      "package": "lit-html",
+      "issue_type": "transitive dependency"
+    },
+    {
+      "file": "/test/module.js",
+      "line": 8,
+      "specifier": "typescript",
+      "package": "typescript",
+      "issue_type": "devDependency"
+    },
+    {
+      "file": "/test/module.js",
+      "line": 11,
+      "specifier": "not-installed-package",
+      "package": "not-installed-package",
+      "issue_type": "not installed"
+    }
+  ]
+}
