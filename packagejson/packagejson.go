@@ -20,6 +20,7 @@ package packagejson
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 
 	"bennypowers.dev/mappa/fs"
@@ -178,11 +179,20 @@ func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (str
 	}
 
 	// Try wildcard pattern matching (e.g., "./*" -> "./elements/*")
-	for pattern, value := range exportsMap {
-		if !strings.Contains(pattern, "*") {
-			continue
+	// Collect and sort patterns by specificity (longer prefix = higher priority)
+	var patterns []string
+	for pattern := range exportsMap {
+		if strings.Contains(pattern, "*") {
+			patterns = append(patterns, pattern)
 		}
+	}
+	// Sort by length descending (more specific patterns first)
+	sort.Slice(patterns, func(i, j int) bool {
+		return len(patterns[i]) > len(patterns[j])
+	})
 
+	for _, pattern := range patterns {
+		value := exportsMap[pattern]
 		// Match pattern like "./*" or "./*.js"
 		matched, captured := matchExportPattern(pattern, subpath)
 		if !matched {

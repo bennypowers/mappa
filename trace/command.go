@@ -88,31 +88,43 @@ type Warning struct {
 	Package   string `json:"package"`
 }
 
-// TraceSingle traces a single HTML file and generates an import map.
-func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*SingleResult, error) {
-	// Find workspace root and node_modules for transitive dependency tracing
+// tracerSetup holds common tracing prerequisites.
+type tracerSetup struct {
+	workspaceRoot string
+	tracer        *Tracer
+	pkg           *packagejson.PackageJSON
+	pkgErr        error
+}
+
+// setupTracer creates common tracing prerequisites for a package root.
+func setupTracer(osfs fs.FileSystem, absRoot string) tracerSetup {
 	workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
 	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
 
-	// Parse package.json for self-referencing imports and dependency validation
 	pkgPath := filepath.Join(absRoot, "package.json")
 	pkg, pkgErr := packagejson.ParseFile(osfs, pkgPath)
 
-	// Build tracer with self-package awareness and transitive dependency following
 	tracer := NewTracer(osfs, absRoot).WithNodeModules(nodeModulesPath)
 	if pkgErr == nil && pkg.Name != "" {
 		tracer = tracer.WithSelfPackage(pkg, absRoot)
 	}
 
-	graph, err := tracer.TraceHTML(htmlFile)
+	return tracerSetup{workspaceRoot, tracer, pkg, pkgErr}
+}
+
+// TraceSingle traces a single HTML file and generates an import map.
+func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*SingleResult, error) {
+	setup := setupTracer(osfs, absRoot)
+
+	graph, err := setup.tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return nil, err
 	}
 
 	// Validate imports against dependencies if package.json was parsed
 	var issues []ImportIssue
-	if pkgErr == nil {
-		issues = graph.ValidateImports(osfs, absRoot, pkg.Name, pkg.Dependencies, pkg.DevDependencies)
+	if setup.pkgErr == nil {
+		issues = graph.ValidateImports(osfs, absRoot, setup.pkg.Name, setup.pkg.Dependencies, setup.pkg.DevDependencies)
 	}
 
 	result := &SingleResult{Issues: issues}
@@ -137,9 +149,9 @@ func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*S
 	}
 
 	// Include root package exports if traced specifiers reference the root package
-	if pkgErr == nil && pkg.Name != "" {
+	if setup.pkgErr == nil && setup.pkg.Name != "" {
 		for _, spec := range bareSpecs {
-			if spec == pkg.Name || strings.HasPrefix(spec, pkg.Name+"/") {
+			if spec == setup.pkg.Name || strings.HasPrefix(spec, setup.pkg.Name+"/") {
 				resolver = resolver.WithIncludeRootExports()
 				break
 			}
@@ -147,13 +159,13 @@ func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*S
 	}
 
 	// Generate full import map for scopes and trailing-slash keys
-	generatedMap, err := resolver.Resolve(workspaceRoot)
+	generatedMap, err := resolver.Resolve(setup.workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 
 	// Resolve traced specifiers
-	tracedImports := resolver.ResolveSpecifiers(workspaceRoot, bareSpecs)
+	tracedImports := resolver.ResolveSpecifiers(setup.workspaceRoot, bareSpecs)
 
 	// Add trailing-slash keys from generated imports
 	for key, value := range generatedMap.Imports {
@@ -173,34 +185,22 @@ func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*S
 
 // TraceSpecifiers returns the legacy specifiers format for debugging.
 func TraceSpecifiers(osfs fs.FileSystem, htmlFile, absRoot string) (*SpecifiersResult, []ImportIssue, error) {
-	// Find workspace root and node_modules for transitive dependency tracing
-	workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
-	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
+	setup := setupTracer(osfs, absRoot)
 
-	// Parse package.json for self-referencing imports and dependency validation
-	pkgPath := filepath.Join(absRoot, "package.json")
-	pkg, pkgErr := packagejson.ParseFile(osfs, pkgPath)
-
-	// Build tracer with self-package awareness and transitive dependency following
-	tracer := NewTracer(osfs, absRoot).WithNodeModules(nodeModulesPath)
-	if pkgErr == nil && pkg.Name != "" {
-		tracer = tracer.WithSelfPackage(pkg, absRoot)
-	}
-
-	graph, err := tracer.TraceHTML(htmlFile)
+	graph, err := setup.tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Validate imports against dependencies if package.json was parsed
 	var issues []ImportIssue
-	if pkgErr == nil {
-		issues = graph.ValidateImports(osfs, absRoot, pkg.Name, pkg.Dependencies, pkg.DevDependencies)
+	if setup.pkgErr == nil {
+		issues = graph.ValidateImports(osfs, absRoot, setup.pkg.Name, setup.pkg.Dependencies, setup.pkg.DevDependencies)
 	}
 
 	// Convert absolute paths to relative for portable output
 	relativize := func(absPath string) string {
-		if rel, err := filepath.Rel(workspaceRoot, absPath); err == nil {
+		if rel, err := filepath.Rel(setup.workspaceRoot, absPath); err == nil {
 			return rel
 		}
 		return absPath

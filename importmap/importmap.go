@@ -145,11 +145,14 @@ func (im *ImportMap) Simplify() *ImportMap {
 		result.Imports = simplifyImports(im.Imports)
 	}
 
-	// Simplify each scope
+	// Simplify each scope, omitting scopes that become empty
 	if im.Scopes != nil {
 		result.Scopes = make(map[string]map[string]string, len(im.Scopes))
 		for scope, imports := range im.Scopes {
-			result.Scopes[scope] = simplifyImports(imports)
+			simplified := simplifyImports(imports)
+			if len(simplified) > 0 {
+				result.Scopes[scope] = simplified
+			}
 		}
 	}
 

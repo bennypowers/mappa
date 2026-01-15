@@ -19,6 +19,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,8 +51,11 @@ var (
 				}
 				cpuprofileFile = f
 				if err := pprof.StartCPUProfile(f); err != nil {
-					f.Close()
-					return fmt.Errorf("could not start CPU profile: %w", err)
+					closeErr := f.Close()
+					return errors.Join(
+						fmt.Errorf("could not start CPU profile: %w", err),
+						closeErr,
+					)
 				}
 			}
 			return nil
@@ -59,7 +63,9 @@ var (
 		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
 			if cpuprofileFile != nil {
 				pprof.StopCPUProfile()
-				cpuprofileFile.Close()
+				if err := cpuprofileFile.Close(); err != nil {
+					return fmt.Errorf("closing CPU profile: %w", err)
+				}
 			}
 			return nil
 		},

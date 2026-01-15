@@ -440,14 +440,6 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	return result, graph, nil
 }
 
-// resolveWorkspace generates an import map for a monorepo workspace.
-// Workspace packages are added to global imports, and their dependencies
-// from node_modules are resolved using the template.
-func (r *Resolver) resolveWorkspace(rootDir string) (*importmap.ImportMap, error) {
-	im, _, err := r.resolveWorkspaceInternal(rootDir, nil)
-	return im, err
-}
-
 // resolveWorkspaceInternal is the core workspace resolution logic, optionally tracking dependencies.
 func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.DependencyGraph) (*importmap.ImportMap, *resolve.DependencyGraph, error) {
 	result := &importmap.ImportMap{
@@ -555,12 +547,6 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 	return result, graph, nil
 }
 
-// addWorkspacePackageToImportMap adds a workspace package's exports to the import map.
-// Unlike node_modules packages, workspace packages use web paths relative to rootDir.
-func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string) error {
-	return r.addWorkspacePackageToImportMapWithGraph(im, pkg, rootDir, nil)
-}
-
 // addWorkspacePackageToImportMapWithGraph adds a workspace package's exports to the import map,
 // optionally tracking in the dependency graph.
 func (r *Resolver) addWorkspacePackageToImportMapWithGraph(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string, graph *resolve.DependencyGraph) error {
@@ -650,12 +636,6 @@ func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejs
 	return nil
 }
 
-// addPackageToImportMap adds a package's exports to the import map.
-// It builds entries locally first, then acquires the lock to merge them.
-func (r *Resolver) addPackageToImportMap(im *importmap.ImportMap, mu *sync.Mutex, pkgName, pkgPath string) error {
-	return r.addPackageToImportMapWithGraph(im, mu, pkgName, pkgPath, nil)
-}
-
 // addPackageToImportMapWithGraph adds a package's exports to the import map,
 // optionally tracking in the dependency graph.
 func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *sync.Mutex, pkgName, pkgPath string, graph *resolve.DependencyGraph) error {
@@ -718,12 +698,6 @@ func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *s
 	return nil
 }
 
-// addTransitiveDependencies adds scopes for packages that have their own dependencies.
-// Uses parallel processing for improved performance on large dependency trees.
-func (r *Resolver) addTransitiveDependencies(im *importmap.ImportMap, rootDir string, rootPkg *packagejson.PackageJSON) error {
-	return r.addTransitiveDependenciesWithGraph(im, rootDir, rootPkg, nil)
-}
-
 // addTransitiveDependenciesWithGraph adds scopes for packages that have their own dependencies,
 // optionally tracking in the dependency graph.
 func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, rootDir string, rootPkg *packagejson.PackageJSON, graph *resolve.DependencyGraph) error {
@@ -749,17 +723,6 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 
 	wg.Wait()
 	return nil
-}
-
-// processPackageDependenciesParallel recursively processes a package's dependencies and adds scopes.
-// Uses thread-safe data structures for concurrent access.
-func (r *Resolver) processPackageDependenciesParallel(
-	im *importmap.ImportMap,
-	mu *sync.Mutex,
-	visited *sync.Map,
-	nodeModulesPath, pkgName, rootDir string,
-) {
-	r.processPackageDependenciesParallelWithGraph(im, mu, visited, nodeModulesPath, pkgName, rootDir, nil)
 }
 
 // processPackageDependenciesParallelWithGraph recursively processes a package's dependencies and adds scopes,
@@ -822,12 +785,11 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 
 		// Handle wildcard exports (trailing slash imports)
 		wildcards := depPkg.WildcardExports(opts)
-		hasTrailingSlash := depPkg.HasTrailingSlashExport(opts) && len(wildcards) == 0
-
-		// Check for simple wildcard patterns that can be simplified
-		if len(wildcards) == 1 && wildcards[0].Pattern == "./*" {
-			hasTrailingSlash = true
-		}
+		// Determine if we should use a trailing-slash key:
+		// 1. Package explicitly supports trailing-slash and has no wildcards, OR
+		// 2. Package has exactly one "./*" wildcard (equivalent to trailing-slash)
+		hasSimpleWildcard := len(wildcards) == 1 && wildcards[0].Pattern == "./*"
+		hasTrailingSlash := (depPkg.HasTrailingSlashExport(opts) && len(wildcards) == 0) || hasSimpleWildcard
 
 		// Add trailing-slash keys for wildcard exports
 		for _, w := range wildcards {
@@ -841,14 +803,10 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			scopeEntries[depName+"/"] = r.template.Expand(depName, "", "")
 		}
 
-		// Add export entries, but skip subpaths covered by trailing-slash keys
+		// Add export entries - explicit exports are never skipped since they may
+		// have different targets than wildcard patterns would provide
 		entries := depPkg.ExportEntries(opts)
 		for _, entry := range entries {
-			// Skip subpath entries if covered by trailing-slash key
-			if hasTrailingSlash && entry.Subpath != "." {
-				continue
-			}
-
 			var importKey string
 			if entry.Subpath == "." {
 				importKey = depName

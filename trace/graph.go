@@ -60,17 +60,20 @@ type Tracer struct {
 	selfPkgPath     string                   // Path to current package root
 
 	// pkgCache caches parsed package.json files by path (thread-safe).
-	pkgCache sync.Map // map[string]*packagejson.PackageJSON
+	// Pointer is used so caches can be shared across builder method calls.
+	pkgCache *sync.Map // map[string]*packagejson.PackageJSON
 	// moduleCache caches traced modules by path (thread-safe).
 	// Used for cross-file caching in batch mode.
-	moduleCache sync.Map // map[string]*Module
+	moduleCache *sync.Map // map[string]*Module
 }
 
 // NewTracer creates a new Tracer for the given root directory.
 func NewTracer(fs fs.FileSystem, rootDir string) *Tracer {
 	return &Tracer{
-		fs:      fs,
-		rootDir: rootDir,
+		fs:          fs,
+		rootDir:     rootDir,
+		pkgCache:    &sync.Map{},
+		moduleCache: &sync.Map{},
 	}
 }
 
@@ -84,6 +87,8 @@ func (t *Tracer) WithNodeModules(nodeModulesPath string) *Tracer {
 		followBare:      true,
 		selfPkg:         t.selfPkg,
 		selfPkgPath:     t.selfPkgPath,
+		pkgCache:        t.pkgCache,
+		moduleCache:     t.moduleCache,
 	}
 }
 
@@ -98,6 +103,8 @@ func (t *Tracer) WithSelfPackage(pkg *packagejson.PackageJSON, pkgPath string) *
 		followBare:      t.followBare,
 		selfPkg:         pkg,
 		selfPkgPath:     pkgPath,
+		pkgCache:        t.pkgCache,
+		moduleCache:     t.moduleCache,
 	}
 }
 
@@ -312,6 +319,21 @@ func (t *Tracer) resolveBareSpecifier(specifier string) (string, error) {
 		return "", nil
 	}
 
+	return resolvePackageSubpath(pkg, pkgPath, subpath)
+}
+
+// resolveSelfImport resolves an import of the current package (self-reference).
+// The subpath should already be normalized to start with "./" or be ".".
+func (t *Tracer) resolveSelfImport(subpath string) (string, error) {
+	if t.selfPkg == nil {
+		return "", nil
+	}
+	return resolvePackageSubpath(t.selfPkg, t.selfPkgPath, subpath)
+}
+
+// resolvePackageSubpath resolves a subpath within a package directory,
+// using exports resolution first with fallback to direct path.
+func resolvePackageSubpath(pkg *packagejson.PackageJSON, pkgPath, subpath string) (string, error) {
 	// Try to resolve through exports
 	resolved, err := pkg.ResolveExport(subpath, nil)
 	if err == nil {
@@ -328,31 +350,6 @@ func (t *Tracer) resolveBareSpecifier(specifier string) (string, error) {
 
 	// Use subpath directly
 	return filepath.Join(pkgPath, strings.TrimPrefix(subpath, "./")), nil
-}
-
-// resolveSelfImport resolves an import of the current package (self-reference).
-// The subpath should already be normalized to start with "./" or be ".".
-func (t *Tracer) resolveSelfImport(subpath string) (string, error) {
-	if t.selfPkg == nil {
-		return "", nil
-	}
-
-	// Try to resolve through exports
-	resolved, err := t.selfPkg.ResolveExport(subpath, nil)
-	if err == nil {
-		return filepath.Join(t.selfPkgPath, resolved), nil
-	}
-
-	// Fall back to direct subpath
-	if subpath == "." {
-		if t.selfPkg.Main != "" {
-			return filepath.Join(t.selfPkgPath, strings.TrimPrefix(t.selfPkg.Main, "./")), nil
-		}
-		return filepath.Join(t.selfPkgPath, "index.js"), nil
-	}
-
-	// Use subpath directly
-	return filepath.Join(t.selfPkgPath, strings.TrimPrefix(subpath, "./")), nil
 }
 
 // resolvePath resolves a specifier relative to a base directory.

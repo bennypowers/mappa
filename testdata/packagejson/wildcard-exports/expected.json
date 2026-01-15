@@ -2,5 +2,11 @@
   "wildcard": {
     "pattern": "./*",
     "target": "dist/"
+  },
+  "resolutions": {
+    ".": "index.js",
+    "./foo": "dist/foo.js",
+    "./bar/baz": "dist/bar/baz.js",
+    "./components/button": "dist/components/button.js"
   }
 }

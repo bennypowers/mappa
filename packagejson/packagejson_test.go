@@ -289,24 +289,27 @@ func TestResolveExportWildcard(t *testing.T) {
 		t.Fatalf("ParseFile failed: %v", err)
 	}
 
-	tests := []struct {
-		subpath  string
-		expected string
-	}{
-		{".", "index.js"},
-		{"./foo", "dist/foo.js"},
-		{"./bar/baz", "dist/bar/baz.js"},
-		{"./components/button", "dist/components/button.js"},
+	// Load expected resolutions from fixture
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("ReadFile expected.json failed: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.subpath, func(t *testing.T) {
-			resolved, err := pkg.ResolveExport(tt.subpath, nil)
+	var expected struct {
+		Resolutions map[string]string `json:"resolutions"`
+	}
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Unmarshal expected.json failed: %v", err)
+	}
+
+	for subpath, want := range expected.Resolutions {
+		t.Run(subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, nil)
 			if err != nil {
-				t.Fatalf("ResolveExport(%q) failed: %v", tt.subpath, err)
+				t.Fatalf("ResolveExport(%q) failed: %v", subpath, err)
 			}
-			if resolved != tt.expected {
-				t.Errorf("ResolveExport(%q) = %q, want %q", tt.subpath, resolved, tt.expected)
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
 			}
 		})
 	}
