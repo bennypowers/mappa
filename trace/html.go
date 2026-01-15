@@ -17,65 +17,47 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package trace
 
 import (
+	"bytes"
 	"strings"
 
-	ts "github.com/tree-sitter/go-tree-sitter"
+	"golang.org/x/net/html"
 )
 
 // ExtractScripts parses HTML content and extracts all script tags.
+// Uses Go's html package for fast parsing instead of tree-sitter.
 func ExtractScripts(content []byte) ([]ScriptTag, error) {
-	qm, err := GetQueryManager()
+	doc, err := html.Parse(bytes.NewReader(content))
 	if err != nil {
 		return nil, err
 	}
-
-	parser := getHTMLParser()
-	defer putHTMLParser(parser)
-
-	tree := parser.Parse(content, nil)
-	defer tree.Close()
-
-	query, err := qm.Query("html", "scriptTags")
-	if err != nil {
-		return nil, err
-	}
-
-	cursor := ts.NewQueryCursor()
-	defer cursor.Close()
 
 	var scripts []ScriptTag
-	matches := cursor.Matches(query, tree.RootNode(), content)
-	captureNames := query.CaptureNames()
+	extractScriptsFromNode(doc, &scripts)
 
-	for {
-		match := matches.Next()
-		if match == nil {
-			break
+	return scripts, nil
+}
+
+// extractScriptsFromNode recursively walks the HTML tree to find script elements.
+func extractScriptsFromNode(n *html.Node, scripts *[]ScriptTag) {
+	if n.Type == html.ElementNode && n.Data == "script" {
+		script := ScriptTag{}
+
+		// Extract attributes
+		for _, attr := range n.Attr {
+			switch attr.Key {
+			case "type":
+				script.Type = attr.Val
+			case "src":
+				script.Src = attr.Val
+			}
 		}
 
-		script := ScriptTag{}
-		var currentAttrName string
-
-		for _, capture := range match.Captures {
-			name := captureNames[capture.Index]
-			text := capture.Node.Utf8Text(content)
-
-			switch name {
-			case "attr.name":
-				currentAttrName = text
-			case "attr.value":
-				switch currentAttrName {
-				case "type":
-					script.Type = text
-				case "src":
-					script.Src = text
-				}
-			case "content":
-				rawContent := strings.TrimSpace(text)
-				if rawContent != "" && script.Src == "" {
-					script.Content = rawContent
-					script.Inline = true
-				}
+		// Extract inline content
+		if script.Src == "" && n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
+			rawContent := strings.TrimSpace(n.FirstChild.Data)
+			if rawContent != "" {
+				script.Content = rawContent
+				script.Inline = true
 			}
 		}
 
@@ -91,8 +73,11 @@ func ExtractScripts(content []byte) ([]ScriptTag, error) {
 			}
 		}
 
-		scripts = append(scripts, script)
+		*scripts = append(*scripts, script)
 	}
 
-	return scripts, nil
+	// Recurse into children
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		extractScriptsFromNode(c, scripts)
+	}
 }

@@ -38,7 +38,7 @@ func ExtractImports(content []byte) ([]ModuleImport, error) {
 	}
 	defer tree.Close()
 
-	query, err := qm.Query("typescript", "imports")
+	query, err := qm.Query("imports")
 	if err != nil {
 		return nil, err
 	}

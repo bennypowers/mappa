@@ -161,3 +161,50 @@ func TestToJSONNil(t *testing.T) {
 		t.Errorf("ToJSON should return empty string for nil import map, got: %s", jsonStr)
 	}
 }
+
+func TestSimplify(t *testing.T) {
+	tests := []struct {
+		name string
+		dir  string
+	}{
+		{"basic trailing-slash removal", "simplify-basic"},
+		{"with scopes", "simplify-with-scopes"},
+		{"no trailing-slash keys", "simplify-no-trailing-slash"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mfs := testutil.NewFixtureFS(t, "importmap/"+tt.dir, "/test")
+
+			inputData, err := mfs.ReadFile("/test/input.json")
+			if err != nil {
+				t.Fatalf("Failed to read input.json: %v", err)
+			}
+
+			expectedData, err := mfs.ReadFile("/test/expected.json")
+			if err != nil {
+				t.Fatalf("Failed to read expected.json: %v", err)
+			}
+
+			input, err := importmap.Parse(inputData)
+			if err != nil {
+				t.Fatalf("Failed to parse input: %v", err)
+			}
+
+			var expected importmap.ImportMap
+			if err := json.Unmarshal(expectedData, &expected); err != nil {
+				t.Fatalf("Failed to parse expected: %v", err)
+			}
+
+			result := input.Simplify()
+
+			if !reflect.DeepEqual(result.Imports, expected.Imports) {
+				t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", result.Imports, expected.Imports)
+			}
+
+			if !reflect.DeepEqual(result.Scopes, expected.Scopes) {
+				t.Errorf("Scopes mismatch:\n  got:      %v\n  expected: %v", result.Scopes, expected.Scopes)
+			}
+		})
+	}
+}

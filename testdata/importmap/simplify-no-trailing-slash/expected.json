@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "lit/html.js": "/node_modules/lit/html.js",
+    "lit/decorators.js": "/node_modules/lit/decorators.js"
+  }
+}

@@ -74,11 +74,59 @@ mappa generate --template "/assets/packages/{package}/{path}"
 
 ### `mappa trace`
 
-Trace an HTML file to discover module imports.
+Trace HTML files to discover ES module imports and generate minimal import maps containing only the specifiers actually used.
+
+```
+Flags:
+  -f, --format string        Output format: json, html, specifiers (default "json")
+      --template string      URL template (default: /node_modules/{package}/{path})
+      --conditions string    Export condition priority (e.g., production,browser,import,default)
+      --glob string          Glob pattern to match HTML files (e.g., "_site/**/*.html")
+  -j, --jobs int             Number of parallel workers (default: number of CPUs)
+  -p, --package string       Package directory (default ".")
+  -o, --output string        Output file (default: stdout)
+```
+
+**Examples:**
 
 ```bash
+# Trace a single HTML file
 mappa trace index.html
+
+# Trace with custom template
+mappa trace index.html --template "/assets/packages/{package}/{path}"
+
+# Batch mode with glob pattern (outputs NDJSON)
+mappa trace --glob "_site/**/*.html" -j 8
+
+# Output raw traced specifiers for debugging
+mappa trace index.html --format specifiers
 ```
+
+**How it works:**
+
+1. Parses HTML to find `<script type="module">` tags
+2. Uses tree-sitter to extract all `import` statements from JS modules
+3. Follows transitive dependencies through local and node_modules files
+4. Generates an import map with only the bare specifiers actually imported
+
+**Static Analysis Limitations:**
+
+The trace command uses static analysis to find imports. This means:
+
+- **Dynamic imports with variable specifiers cannot be detected.** For example:
+  ```javascript
+  // This WILL be traced
+  import '@rhds/icons/standard/web-icon.js';
+
+  // This will NOT be traced (specifier is computed at runtime)
+  const iconName = 'web-icon';
+  import(`@rhds/icons/standard/${iconName}.js`);
+  ```
+
+- To handle dynamic imports, mappa includes **trailing-slash import map keys** for all direct dependencies that have wildcard exports. For example, if your package.json lists `@rhds/icons` as a dependency and that package exports `./*`, the import map will include `"@rhds/icons/": "/assets/packages/@rhds/icons/"` to cover any dynamic imports.
+
+- The same applies to scopes: transitive dependencies with wildcard exports get trailing-slash keys so their dynamic imports work correctly.
 
 ## URL Templates
 

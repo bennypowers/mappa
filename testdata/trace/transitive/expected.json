@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "@example/button/button.js": "/node_modules/@example/button/button.js",
+    "lit": "/node_modules/lit/index.js",
+    "lit/decorators.js": "/node_modules/lit/decorators.js"
+  },
+  "scopes": {
+    "/node_modules/@example/button/": {
+      "lit": "/node_modules/lit/index.js",
+      "lit/decorators.js": "/node_modules/lit/decorators.js",
+      "lit/html.js": "/node_modules/lit/html.js"
+    }
+  }
+}

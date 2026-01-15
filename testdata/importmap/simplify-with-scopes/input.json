@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "lit/": "/node_modules/lit/"
+  },
+  "scopes": {
+    "/node_modules/@lit/reactive-element/": {
+      "@lit-labs/ssr-dom-shim": "/node_modules/@lit-labs/ssr-dom-shim/index.js",
+      "@lit-labs/ssr-dom-shim/": "/node_modules/@lit-labs/ssr-dom-shim/",
+      "@lit-labs/ssr-dom-shim/foo.js": "/node_modules/@lit-labs/ssr-dom-shim/foo.js"
+    }
+  }
+}

@@ -23,54 +23,24 @@ import (
 	"sync"
 
 	ts "github.com/tree-sitter/go-tree-sitter"
-	tsHtml "github.com/tree-sitter/tree-sitter-html/bindings/go"
 	tsTypescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
 //go:embed queries/*/*.scm
 var queryFiles embed.FS
 
-// Languages holds pre-initialized tree-sitter language grammars.
-var languages = struct {
-	html       *ts.Language
-	typescript *ts.Language
-}{
-	ts.NewLanguage(tsHtml.Language()),
-	ts.NewLanguage(tsTypescript.LanguageTypescript()),
-}
+// typescript holds the pre-initialized TypeScript language grammar.
+var typescript = ts.NewLanguage(tsTypescript.LanguageTypescript())
 
-// Parser pools for reuse.
-var (
-	htmlParserPool = sync.Pool{
-		New: func() any {
-			parser := ts.NewParser()
-			if err := parser.SetLanguage(languages.html); err != nil {
-				panic("failed to set HTML language: " + err.Error())
-			}
-			return parser
-		},
-	}
-
-	tsParserPool = sync.Pool{
-		New: func() any {
-			parser := ts.NewParser()
-			if err := parser.SetLanguage(languages.typescript); err != nil {
-				panic("failed to set TypeScript language: " + err.Error())
-			}
-			return parser
-		},
-	}
-)
-
-// getHTMLParser retrieves an HTML parser from the pool.
-func getHTMLParser() *ts.Parser {
-	return htmlParserPool.Get().(*ts.Parser)
-}
-
-// putHTMLParser returns an HTML parser to the pool.
-func putHTMLParser(p *ts.Parser) {
-	p.Reset()
-	htmlParserPool.Put(p)
+// tsParserPool provides reusable TypeScript parsers.
+var tsParserPool = sync.Pool{
+	New: func() any {
+		parser := ts.NewParser()
+		if err := parser.SetLanguage(typescript); err != nil {
+			panic("failed to set TypeScript language: " + err.Error())
+		}
+		return parser
+	},
 }
 
 // getTSParser retrieves a TypeScript parser from the pool.
@@ -84,30 +54,21 @@ func putTSParser(p *ts.Parser) {
 	tsParserPool.Put(p)
 }
 
-// QueryManager manages tree-sitter queries for HTML and TypeScript parsing.
+// QueryManager manages tree-sitter queries for TypeScript/JavaScript parsing.
 type QueryManager struct {
-	mu         sync.Mutex
-	closed     bool
-	html       map[string]*ts.Query
-	typescript map[string]*ts.Query
+	mu      sync.Mutex
+	closed  bool
+	queries map[string]*ts.Query
 }
 
 // NewQueryManager creates a new QueryManager with the specified queries loaded.
-func NewQueryManager(htmlQueries, tsQueries []string) (*QueryManager, error) {
+func NewQueryManager(queryNames []string) (*QueryManager, error) {
 	qm := &QueryManager{
-		html:       make(map[string]*ts.Query),
-		typescript: make(map[string]*ts.Query),
+		queries: make(map[string]*ts.Query),
 	}
 
-	for _, name := range htmlQueries {
-		if err := qm.loadQuery("html", name); err != nil {
-			qm.Close()
-			return nil, err
-		}
-	}
-
-	for _, name := range tsQueries {
-		if err := qm.loadQuery("typescript", name); err != nil {
+	for _, name := range queryNames {
+		if err := qm.loadQuery(name); err != nil {
 			qm.Close()
 			return nil, err
 		}
@@ -116,35 +77,19 @@ func NewQueryManager(htmlQueries, tsQueries []string) (*QueryManager, error) {
 	return qm, nil
 }
 
-func (qm *QueryManager) loadQuery(language, name string) error {
-	queryPath := path.Join("queries", language, name+".scm")
+func (qm *QueryManager) loadQuery(name string) error {
+	queryPath := path.Join("queries", "typescript", name+".scm")
 	data, err := queryFiles.ReadFile(queryPath)
 	if err != nil {
 		return fmt.Errorf("failed to read query %s: %w", queryPath, err)
 	}
 
-	var lang *ts.Language
-	switch language {
-	case "html":
-		lang = languages.html
-	case "typescript":
-		lang = languages.typescript
-	default:
-		return fmt.Errorf("unknown language: %s", language)
-	}
-
-	query, qerr := ts.NewQuery(lang, string(data))
+	query, qerr := ts.NewQuery(typescript, string(data))
 	if qerr != nil {
 		return fmt.Errorf("failed to parse query %s: %w", name, qerr)
 	}
 
-	switch language {
-	case "html":
-		qm.html[name] = query
-	case "typescript":
-		qm.typescript[name] = query
-	}
-
+	qm.queries[name] = query
 	return nil
 }
 
@@ -156,32 +101,20 @@ func (qm *QueryManager) Close() {
 		return
 	}
 	qm.closed = true
-	htmlQueries := qm.html
-	tsQueries := qm.typescript
-	qm.html = nil
-	qm.typescript = nil
+	queries := qm.queries
+	qm.queries = nil
 	qm.mu.Unlock()
 
-	for _, q := range htmlQueries {
-		q.Close()
-	}
-	for _, q := range tsQueries {
+	for _, q := range queries {
 		q.Close()
 	}
 }
 
-// Query returns a query by language and name.
-func (qm *QueryManager) Query(language, name string) (*ts.Query, error) {
-	var q *ts.Query
-	var ok bool
-	switch language {
-	case "html":
-		q, ok = qm.html[name]
-	case "typescript":
-		q, ok = qm.typescript[name]
-	}
+// Query returns a query by name.
+func (qm *QueryManager) Query(name string) (*ts.Query, error) {
+	q, ok := qm.queries[name]
 	if !ok {
-		return nil, fmt.Errorf("query not found: %s/%s", language, name)
+		return nil, fmt.Errorf("query not found: %s", name)
 	}
 	return q, nil
 }
@@ -196,10 +129,7 @@ var (
 // GetQueryManager returns the global query manager instance.
 func GetQueryManager() (*QueryManager, error) {
 	globalQMOnce.Do(func() {
-		globalQM, globalQMErr = NewQueryManager(
-			[]string{"scriptTags"},
-			[]string{"imports"},
-		)
+		globalQM, globalQMErr = NewQueryManager([]string{"imports"})
 	})
 	return globalQM, globalQMErr
 }

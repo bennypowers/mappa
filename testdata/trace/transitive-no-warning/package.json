@@ -1,0 +1,9 @@
+{
+  "name": "transitive-no-warning-test",
+  "dependencies": {
+    "@example/button": "^1.0.0"
+  },
+  "devDependencies": {
+    "lit": "^3.0.0"
+  }
+}

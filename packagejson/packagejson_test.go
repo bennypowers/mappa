@@ -281,6 +281,40 @@ func TestWildcardExports(t *testing.T) {
 	}
 }
 
+func TestResolveExportWildcard(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/wildcard-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	// Load expected resolutions from fixture
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("ReadFile expected.json failed: %v", err)
+	}
+
+	var expected struct {
+		Resolutions map[string]string `json:"resolutions"`
+	}
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Unmarshal expected.json failed: %v", err)
+	}
+
+	for subpath, want := range expected.Resolutions {
+		t.Run(subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, nil)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+}
+
 func TestHasTrailingSlashExport(t *testing.T) {
 	tests := []struct {
 		name     string
