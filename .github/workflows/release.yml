@@ -1,0 +1,19 @@
+name: Release
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Existing release tag to build/publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: bennypowers/go-release-workflows/.github/workflows/build-binaries.yml@main
+    with:
+      binary-name: mappa
+      release-tag: ${{ github.event.release.tag_name || inputs.release-tag }}

@@ -1,4 +1,5 @@
 # Binaries
+dist/
 mappa
 mappa_test
 *.exe
