@@ -27,6 +27,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/internal/output"
 	"bennypowers.dev/mappa/resolve"
 	"bennypowers.dev/mappa/resolve/local"
 )
@@ -122,16 +123,5 @@ func run(cmd *cobra.Command, args []string) error {
 	// Simplify the import map to remove entries covered by trailing-slash keys
 	simplifiedMap := generatedMap.Simplify()
 
-	return outputImportMap(osfs, simplifiedMap, viper.GetString("format"))
-}
-
-// outputImportMap formats and writes an import map to stdout or file.
-func outputImportMap(osfs fs.FileSystem, im *importmap.ImportMap, format string) error {
-	output := im.Format(format)
-
-	if outputPath := viper.GetString("output"); outputPath != "" {
-		return osfs.WriteFile(outputPath, []byte(output+"\n"), 0644)
-	}
-	fmt.Println(output)
-	return nil
+	return output.ImportMap(osfs, simplifiedMap, viper.GetString("format"))
 }

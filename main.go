@@ -78,11 +78,11 @@ func init() {
 	_ = viper.BindPFlag("package", rootCmd.PersistentFlags().Lookup("package"))
 	_ = viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
 
-	// Add commands
+	// Add commands (alphabetized)
 	rootCmd.AddCommand(generate.Cmd)
+	rootCmd.AddCommand(inject.Cmd)
 	rootCmd.AddCommand(trace.Cmd)
 	rootCmd.AddCommand(version.Cmd)
-	rootCmd.AddCommand(inject.Cmd)
 }
 
 func main() {

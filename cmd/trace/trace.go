@@ -29,7 +29,7 @@ import (
 	"github.com/spf13/viper"
 
 	"bennypowers.dev/mappa/fs"
-	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/internal/output"
 	"bennypowers.dev/mappa/trace"
 )
 
@@ -161,7 +161,10 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
 		}
 
-		out, _ := json.MarshalIndent(result, "", "  ")
+		out, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal specifiers result: %w", err)
+		}
 		if output := viper.GetString("output"); output != "" {
 			return osfs.WriteFile(output, append(out, '\n'), 0644)
 		}
@@ -180,7 +183,7 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
 	}
 
-	return outputImportMap(osfs, result.ImportMap, format)
+	return output.ImportMap(osfs, result.ImportMap, format)
 }
 
 func runBatch(osfs fs.FileSystem, files []string, absRoot, format string, opts trace.Options) error {
@@ -221,16 +224,5 @@ func runBatch(osfs fs.FileSystem, files []string, absRoot, format string, opts t
 	if errorCount == totalCount {
 		return fmt.Errorf("all %d files failed to trace", errorCount)
 	}
-	return nil
-}
-
-// outputImportMap formats and writes an import map to stdout or file.
-func outputImportMap(osfs fs.FileSystem, im *importmap.ImportMap, format string) error {
-	output := im.Format(format)
-
-	if outputPath := viper.GetString("output"); outputPath != "" {
-		return osfs.WriteFile(outputPath, []byte(output+"\n"), 0644)
-	}
-	fmt.Println(output)
 	return nil
 }

@@ -23,6 +23,7 @@ package inject
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -37,6 +38,9 @@ import (
 )
 
 // Options configures the inject command.
+// Note: Some fields (Template, Conditions, Parallel) overlap with trace.Options.
+// This is intentional to keep the inject package's public API self-contained
+// and avoid coupling to internal trace implementation details.
 type Options struct {
 	// Template is the URL template for import map values.
 	Template string
@@ -89,7 +93,11 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 
 		// Parse package.json once
 		pkgPath := filepath.Join(absRoot, "package.json")
-		pkg, _ := packagejson.ParseFile(osfs, pkgPath)
+		pkg, pkgErr := packagejson.ParseFile(osfs, pkgPath)
+		if pkgErr != nil && osfs.Exists(pkgPath) {
+			// File exists but is malformed - warn but continue
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", pkgPath, pkgErr)
+		}
 
 		// Create shared tracer
 		tracer := trace.NewTracer(osfs, absRoot).WithNodeModules(nodeModulesPath)
@@ -261,16 +269,31 @@ func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, bas
 	}, nil
 }
 
+// indentLines prefixes each non-empty line in s with the given indent.
+func indentLines(s, indent string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = indent + line
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // buildNewContent generates new HTML content with the import map inserted or replaced.
 func buildNewContent(content []byte, loc trace.ImportMapLocation, im *importmap.ImportMap) ([]byte, bool, error) {
 	importMapJSON := im.ToJSON()
 
 	if loc.Found {
 		// Replace existing import map content
+		// Extract the indent from the closing tag line
+		indent := extractIndent(content, loc.TagEnd)
+		indentedJSON := indentLines(importMapJSON, indent)
+
 		var newContent []byte
 		newContent = append(newContent, content[:loc.ContentStart]...)
 		newContent = append(newContent, '\n')
-		newContent = append(newContent, importMapJSON...)
+		newContent = append(newContent, indentedJSON...)
 		newContent = append(newContent, '\n')
 		newContent = append(newContent, content[loc.ContentEnd:]...)
 		return newContent, false, nil
@@ -282,10 +305,13 @@ func buildNewContent(content []byte, loc trace.ImportMapLocation, im *importmap.
 		return nil, false, fmt.Errorf("could not find insertion point (no <head> tag)")
 	}
 
+	// Indent JSON to match the tag indentation
+	indentedJSON := indentLines(importMapJSON, insertPoint.Indent)
+
 	// Build the import map tag with proper indentation
 	var tag strings.Builder
 	tag.WriteString("<script type=\"importmap\">\n")
-	tag.WriteString(importMapJSON)
+	tag.WriteString(indentedJSON)
 	tag.WriteString("\n")
 	tag.WriteString(insertPoint.Indent)
 	tag.WriteString("</script>\n")
@@ -298,4 +324,20 @@ func buildNewContent(content []byte, loc trace.ImportMapLocation, im *importmap.
 	newContent = append(newContent, content[insertPoint.Offset:]...)
 
 	return newContent, true, nil
+}
+
+// extractIndent extracts the leading whitespace from the line containing the given offset.
+func extractIndent(content []byte, offset int) string {
+	// Find the start of the line
+	lineStart := offset
+	for lineStart > 0 && content[lineStart-1] != '\n' {
+		lineStart--
+	}
+
+	// Extract leading whitespace
+	var indent strings.Builder
+	for i := lineStart; i < len(content) && (content[i] == ' ' || content[i] == '\t'); i++ {
+		indent.WriteByte(content[i])
+	}
+	return indent.String()
 }

@@ -709,8 +709,8 @@ func TestInjectMissingGlob(t *testing.T) {
 		t.Error("Expected non-zero exit code for missing --glob")
 	}
 
-	if !strings.Contains(stderr, "--glob is required") {
-		t.Errorf("Expected '--glob is required' error, got: %s", stderr)
+	if !strings.Contains(stderr, `"glob" not set`) {
+		t.Errorf("Expected 'glob not set' error, got: %s", stderr)
 	}
 }
 

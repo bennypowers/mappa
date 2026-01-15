@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/spf13/cobra"
@@ -58,6 +59,7 @@ and writes the result back to the file.`,
 
 func init() {
 	Cmd.Flags().String("glob", "", "Glob pattern to match HTML files (required)")
+	_ = Cmd.MarkFlagRequired("glob")
 	Cmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 	Cmd.Flags().IntP("jobs", "j", 0, "Number of parallel workers (default: number of CPUs)")
@@ -75,9 +77,6 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Collect files from glob pattern
 	globPattern, _ := cmd.Flags().GetString("glob")
-	if globPattern == "" {
-		return fmt.Errorf("--glob is required")
-	}
 
 	matches, err := doublestar.FilepathGlob(globPattern)
 	if err != nil {
@@ -109,6 +108,9 @@ func run(cmd *cobra.Command, args []string) error {
 	parallel, _ := cmd.Flags().GetInt("jobs")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	format, _ := cmd.Flags().GetString("format")
+	if format != "text" && format != "json" {
+		return fmt.Errorf("invalid format %q: must be 'text' or 'json'", format)
+	}
 
 	opts := inject.Options{
 		Template:   templateArg,
@@ -124,6 +126,7 @@ func run(cmd *cobra.Command, args []string) error {
 	var stats inject.Stats
 	stats.Total = len(files)
 
+	start := time.Now()
 	encoder := json.NewEncoder(os.Stdout)
 	for result := range results {
 		if result.Error != "" {
@@ -141,10 +144,16 @@ func run(cmd *cobra.Command, args []string) error {
 			}
 			if format == "json" {
 				_ = encoder.Encode(result)
-			} else if dryRun {
-				action := "would update"
+			} else {
+				action := "updated"
+				if dryRun {
+					action = "would update"
+				}
 				if result.Inserted {
-					action = "would insert into"
+					action = "inserted into"
+					if dryRun {
+						action = "would insert into"
+					}
 				}
 				fmt.Printf("%s %s\n", action, result.File)
 			}
@@ -152,6 +161,7 @@ func run(cmd *cobra.Command, args []string) error {
 			stats.Skipped++
 		}
 	}
+	stats.Duration = time.Since(start).Milliseconds()
 
 	// Output summary
 	if format == "text" {
