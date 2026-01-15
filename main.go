@@ -31,6 +31,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/inject"
 	"bennypowers.dev/mappa/internal/version"
 	"bennypowers.dev/mappa/resolve"
 	"bennypowers.dev/mappa/resolve/local"
@@ -130,6 +131,28 @@ var versionCmd = &cobra.Command{
 	RunE:  runVersion,
 }
 
+var injectCmd = &cobra.Command{
+	Use:   "inject",
+	Short: "Trace HTML files and inject import maps in-place",
+	Long: `Trace HTML files and update their import map script tags in-place.
+
+For each file, traces module imports to generate a minimal import map,
+merges with any existing manual imports (traced imports take precedence),
+and writes the result back to the file.`,
+	Example: `  # Inject import maps into all HTML files
+  mappa inject --glob "_site/**/*.html"
+
+  # Custom URL template
+  mappa inject --glob "_site/**/*.html" --template "/assets/packages/{package}/{path}"
+
+  # Parallel processing with custom worker count
+  mappa inject --glob "_site/**/*.html" -j 8
+
+  # Dry run to see what would change
+  mappa inject --glob "_site/**/*.html" --dry-run`,
+	RunE: runInject,
+}
+
 var cpuprofile string
 
 func init() {
@@ -164,10 +187,19 @@ func init() {
 	// Version command flags
 	versionCmd.Flags().StringP("format", "f", "text", "Output format (text, json)")
 
+	// Inject command flags
+	injectCmd.Flags().String("glob", "", "Glob pattern to match HTML files (required)")
+	injectCmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
+	injectCmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
+	injectCmd.Flags().IntP("jobs", "j", 0, "Number of parallel workers (default: number of CPUs)")
+	injectCmd.Flags().Bool("dry-run", false, "Show what would change without modifying files")
+	injectCmd.Flags().StringP("format", "f", "text", "Output format (text, json)")
+
 	// Add commands
 	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(traceCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(injectCmd)
 }
 
 func main() {
@@ -404,5 +436,115 @@ func runVersion(cmd *cobra.Command, args []string) error {
 	default:
 		fmt.Printf("mappa %s\n", version.GetVersion())
 	}
+	return nil
+}
+
+func runInject(cmd *cobra.Command, args []string) error {
+	osfs := fs.NewOSFileSystem()
+
+	absRoot, err := filepath.Abs(viper.GetString("package"))
+	if err != nil {
+		return fmt.Errorf("invalid package directory: %w", err)
+	}
+
+	// Collect files from glob pattern
+	globPattern, _ := cmd.Flags().GetString("glob")
+	if globPattern == "" {
+		return fmt.Errorf("--glob is required")
+	}
+
+	matches, err := doublestar.FilepathGlob(globPattern)
+	if err != nil {
+		return fmt.Errorf("invalid glob pattern: %w", err)
+	}
+
+	if len(matches) == 0 {
+		fmt.Fprintln(os.Stderr, "Warning: no files matched the glob pattern")
+		return nil
+	}
+
+	// Deduplicate by absolute path
+	seen := make(map[string]struct{})
+	var files []string
+	for _, match := range matches {
+		absPath, err := filepath.Abs(match)
+		if err != nil {
+			return fmt.Errorf("invalid file path %q: %w", match, err)
+		}
+		if _, exists := seen[absPath]; !exists {
+			seen[absPath] = struct{}{}
+			files = append(files, absPath)
+		}
+	}
+
+	// Get flags
+	templateArg, _ := cmd.Flags().GetString("template")
+	conditions, _ := cmd.Flags().GetStringSlice("conditions")
+	parallel, _ := cmd.Flags().GetInt("jobs")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	format, _ := cmd.Flags().GetString("format")
+
+	opts := inject.Options{
+		Template:   templateArg,
+		Conditions: conditions,
+		Parallel:   parallel,
+		DryRun:     dryRun,
+	}
+
+	// Run inject
+	results := inject.InjectBatch(osfs, files, absRoot, opts)
+
+	// Collect results
+	var stats inject.Stats
+	stats.Total = len(files)
+
+	for result := range results {
+		if result.Error != "" {
+			stats.Errors++
+			if format == "json" {
+				encoder := json.NewEncoder(os.Stdout)
+				_ = encoder.Encode(result)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %s: %s\n", result.File, result.Error)
+			}
+		} else if result.Modified {
+			if result.Inserted {
+				stats.Inserted++
+			} else {
+				stats.Updated++
+			}
+			if format == "json" {
+				encoder := json.NewEncoder(os.Stdout)
+				_ = encoder.Encode(result)
+			} else if dryRun {
+				action := "would update"
+				if result.Inserted {
+					action = "would insert into"
+				}
+				fmt.Printf("%s %s\n", action, result.File)
+			}
+		} else {
+			stats.Skipped++
+		}
+	}
+
+	// Output summary
+	if format == "text" {
+		if dryRun {
+			fmt.Printf("\nDry run: %d files would be modified (%d updated, %d new), %d unchanged, %d errors\n",
+				stats.Updated+stats.Inserted, stats.Updated, stats.Inserted, stats.Skipped, stats.Errors)
+		} else {
+			fmt.Printf("Injected: %d files modified (%d updated, %d new), %d unchanged, %d errors\n",
+				stats.Updated+stats.Inserted, stats.Updated, stats.Inserted, stats.Skipped, stats.Errors)
+		}
+	} else {
+		statsJSON, _ := json.Marshal(stats)
+		fmt.Println(string(statsJSON))
+	}
+
+	if stats.Errors == stats.Total {
+		return fmt.Errorf("all %d files failed", stats.Errors)
+	}
+
 	return nil
 }

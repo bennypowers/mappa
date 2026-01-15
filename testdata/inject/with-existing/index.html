@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Test Page</title>
+  <script type="importmap">
+{
+  "imports": {
+    "manual-dep": "/vendor/manual-dep.js"
+  }
+}
+  </script>
+</head>
+<body>
+  <script type="module">
+    import { LitElement } from 'lit';
+    console.log(LitElement);
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "test-inject-with-existing",
+  "dependencies": {
+    "lit": "^3.0.0"
+  }
+}
