@@ -332,7 +332,7 @@ func (t *Tracer) resolveSelfImport(subpath string) (string, error) {
 }
 
 // resolvePackageSubpath resolves a subpath within a package directory,
-// using exports resolution first with fallback to direct path.
+// using exports resolution first with fallback to direct path only if no exports are defined.
 func resolvePackageSubpath(pkg *packagejson.PackageJSON, pkgPath, subpath string) (string, error) {
 	// Try to resolve through exports
 	resolved, err := pkg.ResolveExport(subpath, nil)
@@ -340,7 +340,12 @@ func resolvePackageSubpath(pkg *packagejson.PackageJSON, pkgPath, subpath string
 		return filepath.Join(pkgPath, resolved), nil
 	}
 
-	// Fall back to direct subpath
+	// If package has exports defined, enforce export restrictions - don't fall back
+	if pkg.Exports != nil {
+		return "", err
+	}
+
+	// No exports defined - fall back to direct subpath resolution
 	if subpath == "." {
 		if pkg.Main != "" {
 			return filepath.Join(pkgPath, strings.TrimPrefix(pkg.Main, "./")), nil

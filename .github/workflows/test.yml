@@ -21,5 +21,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum
       - name: Run tests
         run: make test
