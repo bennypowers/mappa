@@ -77,6 +77,12 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid package directory: %w", err)
 	}
 
+	// Validate format flag
+	format := viper.GetString("format")
+	if format != "json" && format != "html" {
+		return fmt.Errorf("invalid format %q: must be 'json' or 'html'", format)
+	}
+
 	// Get additional packages
 	includePackages := viper.GetStringSlice("include-package")
 
@@ -123,5 +129,5 @@ func run(cmd *cobra.Command, args []string) error {
 	// Simplify the import map to remove entries covered by trailing-slash keys
 	simplifiedMap := generatedMap.Simplify()
 
-	return output.ImportMap(osfs, simplifiedMap, viper.GetString("format"))
+	return output.ImportMap(osfs, simplifiedMap, format)
 }

@@ -120,13 +120,13 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run inject
+	start := time.Now()
 	results := inject.InjectBatch(osfs, files, absRoot, opts)
 
 	// Collect results
 	var stats inject.Stats
 	stats.Total = len(files)
 
-	start := time.Now()
 	encoder := json.NewEncoder(os.Stdout)
 	for result := range results {
 		if result.Error != "" {

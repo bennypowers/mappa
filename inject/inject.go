@@ -310,6 +310,7 @@ func buildNewContent(content []byte, loc trace.ImportMapLocation, im *importmap.
 
 	// Build the import map tag with proper indentation
 	var tag strings.Builder
+	tag.WriteString(insertPoint.Indent)
 	tag.WriteString("<script type=\"importmap\">\n")
 	tag.WriteString(indentedJSON)
 	tag.WriteString("\n")
