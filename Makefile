@@ -1,4 +1,4 @@
-.PHONY: test lint
+.PHONY: all test lint clean install
 
 # Workaround for Gentoo Linux "hole in findfunctab" error with race detector
 # See: https://bugs.gentoo.org/961618
@@ -11,7 +11,7 @@ else
 endif
 
 all:
-	go build ./... -o mappa
+	go build -o mappa .
 
 install: all
 	cp mappa ~/.local/bin/mappa

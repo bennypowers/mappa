@@ -27,6 +27,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/packagejson"
+	"bennypowers.dev/mappa/resolve"
 )
 
 // ModuleGraph represents the complete module dependency graph.
@@ -55,6 +56,7 @@ type Module struct {
 type Tracer struct {
 	fs              fs.FileSystem
 	rootDir         string
+	logger          resolve.Logger
 	nodeModulesPath string // Path to node_modules for resolving bare specifiers
 	followBare      bool   // Whether to follow bare specifier imports into node_modules
 	selfPkg         *packagejson.PackageJSON // Current package for self-referencing imports
@@ -78,12 +80,28 @@ func NewTracer(fs fs.FileSystem, rootDir string) *Tracer {
 	}
 }
 
+// WithLogger returns a new Tracer that logs warnings to the given logger.
+func (t *Tracer) WithLogger(logger resolve.Logger) *Tracer {
+	return &Tracer{
+		fs:              t.fs,
+		rootDir:         t.rootDir,
+		logger:          logger,
+		nodeModulesPath: t.nodeModulesPath,
+		followBare:      t.followBare,
+		selfPkg:         t.selfPkg,
+		selfPkgPath:     t.selfPkgPath,
+		pkgCache:        t.pkgCache,
+		moduleCache:     t.moduleCache,
+	}
+}
+
 // WithNodeModules returns a new Tracer that resolves bare specifiers from the given
 // node_modules path. When set, the tracer will follow transitive dependencies.
 func (t *Tracer) WithNodeModules(nodeModulesPath string) *Tracer {
 	return &Tracer{
 		fs:              t.fs,
 		rootDir:         t.rootDir,
+		logger:          t.logger,
 		nodeModulesPath: nodeModulesPath,
 		followBare:      true,
 		selfPkg:         t.selfPkg,
@@ -100,6 +118,7 @@ func (t *Tracer) WithSelfPackage(pkg *packagejson.PackageJSON, pkgPath string) *
 	return &Tracer{
 		fs:              t.fs,
 		rootDir:         t.rootDir,
+		logger:          t.logger,
 		nodeModulesPath: t.nodeModulesPath,
 		followBare:      t.followBare,
 		selfPkg:         pkg,
@@ -268,7 +287,7 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 
 // getPackageJSON returns a cached package.json, parsing and caching it if needed.
 // Returns nil if the package.json doesn't exist or can't be parsed.
-// Parse errors (as opposed to missing files) are logged to stderr for debugging.
+// Parse errors (as opposed to missing files) are logged for debugging.
 func (t *Tracer) getPackageJSON(pkgJSONPath string) *packagejson.PackageJSON {
 	// Check cache first
 	if cached, ok := t.pkgCache.Load(pkgJSONPath); ok {
@@ -282,8 +301,8 @@ func (t *Tracer) getPackageJSON(pkgJSONPath string) *packagejson.PackageJSON {
 	pkg, err := packagejson.ParseFile(t.fs, pkgJSONPath)
 	if err != nil {
 		// Log parse errors (not missing files) to help with debugging
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", pkgJSONPath, err)
+		if !os.IsNotExist(err) && t.logger != nil {
+			t.logger.Warning("failed to parse %s: %v", pkgJSONPath, err)
 		}
 		t.pkgCache.Store(pkgJSONPath, nil) // Cache negative result
 		return nil
