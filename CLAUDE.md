@@ -2,7 +2,7 @@
 
 Getter methods should be named `Foo()`, not `GetFoo()`.
 
-Run `go vet` to surface gopls suggestions. Common examples:
+Use `gopls` diagnostics to surface suggestions. Common examples:
 - replace `interface{}` with `any`
 - replace `if/else` with `min`
 - replace `m[k]=v` loop with `maps.Copy` [mapsloop]
@@ -22,6 +22,8 @@ Run `go vet` to surface gopls suggestions. Common examples:
     ```
 
 ## Testing
+
+Run `make lint` and `make test` to verify changes.
 
 Practice TDD. When writing tests, always use the fixture/golden patterns:
 
@@ -128,4 +130,4 @@ When adding new filesystem operations, ensure the interface stays compatible wit
 
 ## Shared logic
 
-similar packages like generate and trace often share concerns (tracing module graphs, caching package.json files, etc). Be sure to share logic where possible, instead of duplicating.
+Similar packages like generate and trace often share concerns (tracing module graphs, caching package.json files, etc). Be sure to share logic where possible, instead of duplicating.
