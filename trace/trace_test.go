@@ -362,3 +362,166 @@ func TestResolvePath(t *testing.T) {
 		}
 	}
 }
+
+func TestFindImportMapTag(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/find-importmap", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+
+	loc := FindImportMapTag(html)
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Found        bool `json:"found"`
+		TagStart     int  `json:"tag_start"`
+		TagEnd       int  `json:"tag_end"`
+		ContentStart int  `json:"content_start"`
+		ContentEnd   int  `json:"content_end"`
+		Line         int  `json:"line"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	if loc.Found != expected.Found {
+		t.Errorf("Found: expected %v, got %v", expected.Found, loc.Found)
+	}
+	if loc.TagStart != expected.TagStart {
+		t.Errorf("TagStart: expected %d, got %d", expected.TagStart, loc.TagStart)
+	}
+	if loc.TagEnd != expected.TagEnd {
+		t.Errorf("TagEnd: expected %d, got %d", expected.TagEnd, loc.TagEnd)
+	}
+	if loc.ContentStart != expected.ContentStart {
+		t.Errorf("ContentStart: expected %d, got %d", expected.ContentStart, loc.ContentStart)
+	}
+	if loc.ContentEnd != expected.ContentEnd {
+		t.Errorf("ContentEnd: expected %d, got %d", expected.ContentEnd, loc.ContentEnd)
+	}
+	if loc.Line != expected.Line {
+		t.Errorf("Line: expected %d, got %d", expected.Line, loc.Line)
+	}
+
+	// Verify the content extraction makes sense
+	if loc.Found {
+		content := string(html[loc.ContentStart:loc.ContentEnd])
+		if !strings.Contains(content, "manual-dep") {
+			t.Errorf("Content should contain 'manual-dep', got: %q", content)
+		}
+	}
+}
+
+func TestFindImportMapTag_NotFound(t *testing.T) {
+	html := []byte(`<!DOCTYPE html>
+<html>
+<head>
+  <script type="module" src="./app.js"></script>
+</head>
+<body></body>
+</html>`)
+
+	loc := FindImportMapTag(html)
+	if loc.Found {
+		t.Errorf("Expected Found=false for HTML without import map")
+	}
+}
+
+func TestFindImportMapTag_Empty(t *testing.T) {
+	html := []byte(`<!DOCTYPE html>
+<html>
+<head>
+  <script type="importmap"></script>
+</head>
+</html>`)
+
+	loc := FindImportMapTag(html)
+	if !loc.Found {
+		t.Fatalf("Expected to find empty import map tag")
+	}
+	if loc.ContentStart != loc.ContentEnd {
+		t.Errorf("Empty import map should have ContentStart == ContentEnd, got %d != %d",
+			loc.ContentStart, loc.ContentEnd)
+	}
+}
+
+func TestFindInsertPoint(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/find-insertpoint", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+
+	pt := FindInsertPoint(html)
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Found  bool   `json:"found"`
+		Offset int    `json:"offset"`
+		Indent string `json:"indent"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	if pt.Found != expected.Found {
+		t.Errorf("Found: expected %v, got %v", expected.Found, pt.Found)
+	}
+	if pt.Offset != expected.Offset {
+		t.Errorf("Offset: expected %d, got %d", expected.Offset, pt.Offset)
+	}
+	if pt.Indent != expected.Indent {
+		t.Errorf("Indent: expected %q, got %q", expected.Indent, pt.Indent)
+	}
+
+	// Verify the insertion point is before the script tag
+	if pt.Found {
+		afterInsert := string(html[pt.Offset:])
+		if !strings.HasPrefix(afterInsert, "<script") {
+			t.Errorf("Insert point should be before <script>, got: %q...", afterInsert[:min(50, len(afterInsert))])
+		}
+	}
+}
+
+func TestFindInsertPoint_NoScripts(t *testing.T) {
+	html := []byte(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Test</title>
+</head>
+<body></body>
+</html>`)
+
+	pt := FindInsertPoint(html)
+	if !pt.Found {
+		t.Fatalf("Expected to find insert point before </head>")
+	}
+
+	// Insert point should be before </head>
+	afterInsert := string(html[pt.Offset:])
+	if !strings.HasPrefix(afterInsert, "</head>") {
+		t.Errorf("Insert point should be before </head>, got: %q...", afterInsert[:min(50, len(afterInsert))])
+	}
+}
+
+func TestFindInsertPoint_NoHead(t *testing.T) {
+	html := []byte(`<!DOCTYPE html>
+<html>
+<body></body>
+</html>`)
+
+	pt := FindInsertPoint(html)
+	if pt.Found {
+		t.Errorf("Expected Found=false for HTML without head")
+	}
+}

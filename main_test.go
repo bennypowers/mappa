@@ -682,3 +682,180 @@ func TestShortFlags(t *testing.T) {
 		t.Error("Expected imports in output")
 	}
 }
+
+func TestInjectHelp(t *testing.T) {
+	stdout, _, code := runCLI(t, "inject", "--help")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for help, got %d", code)
+	}
+
+	expectedStrings := []string{
+		"--glob",
+		"--template",
+		"--dry-run",
+		"-j",
+	}
+
+	for _, s := range expectedStrings {
+		if !strings.Contains(stdout, s) {
+			t.Errorf("Expected %q in inject help output", s)
+		}
+	}
+}
+
+func TestInjectMissingGlob(t *testing.T) {
+	_, stderr, code := runCLI(t, "inject")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for missing --glob")
+	}
+
+	if !strings.Contains(stderr, `"glob" not set`) {
+		t.Errorf("Expected 'glob not set' error, got: %s", stderr)
+	}
+}
+
+func TestInjectDryRun(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "inject", "with-existing")
+	globPattern := filepath.Join(fixtureDir, "*.html")
+
+	stdout, stderr, code := runCLI(t, "inject", "--glob", globPattern, "--package", fixtureDir, "--dry-run")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Should show "would update" in dry-run mode
+	if !strings.Contains(stdout, "would update") && !strings.Contains(stdout, "would be modified") {
+		t.Errorf("Expected 'would update' or 'would be modified' in dry-run output, got: %s", stdout)
+	}
+}
+
+func TestInjectUpdateExisting(t *testing.T) {
+	// Copy fixture to temp dir to avoid modifying test fixtures
+	fixtureDir := filepath.Join("testdata", "inject", "with-existing")
+	tmpDir := t.TempDir()
+
+	// Copy files
+	copyFile(t, filepath.Join(fixtureDir, "index.html"), filepath.Join(tmpDir, "index.html"))
+	copyFile(t, filepath.Join(fixtureDir, "package.json"), filepath.Join(tmpDir, "package.json"))
+	copyDir(t, filepath.Join(fixtureDir, "node_modules"), filepath.Join(tmpDir, "node_modules"))
+
+	globPattern := filepath.Join(tmpDir, "*.html")
+
+	stdout, stderr, code := runCLI(t, "inject", "--glob", globPattern, "--package", tmpDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Should show summary
+	if !strings.Contains(stdout, "Injected") {
+		t.Errorf("Expected 'Injected' in output, got: %s", stdout)
+	}
+
+	// Read the modified file
+	content, err := os.ReadFile(filepath.Join(tmpDir, "index.html"))
+	if err != nil {
+		t.Fatalf("Failed to read modified file: %v", err)
+	}
+
+	// Should contain both manual-dep (preserved) and lit (traced)
+	if !strings.Contains(string(content), "manual-dep") {
+		t.Error("Expected 'manual-dep' to be preserved in import map")
+	}
+	if !strings.Contains(string(content), "\"lit\"") {
+		t.Error("Expected 'lit' to be added to import map")
+	}
+}
+
+func TestInjectInsertNew(t *testing.T) {
+	// Copy fixture to temp dir
+	fixtureDir := filepath.Join("testdata", "inject", "no-importmap")
+	tmpDir := t.TempDir()
+
+	copyFile(t, filepath.Join(fixtureDir, "index.html"), filepath.Join(tmpDir, "index.html"))
+	copyFile(t, filepath.Join(fixtureDir, "package.json"), filepath.Join(tmpDir, "package.json"))
+	copyDir(t, filepath.Join(fixtureDir, "node_modules"), filepath.Join(tmpDir, "node_modules"))
+
+	globPattern := filepath.Join(tmpDir, "*.html")
+
+	stdout, stderr, code := runCLI(t, "inject", "--glob", globPattern, "--package", tmpDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Should show "new" in stats
+	if !strings.Contains(stdout, "new") {
+		t.Errorf("Expected 'new' in output for inserted import map, got: %s", stdout)
+	}
+
+	// Read the modified file
+	content, err := os.ReadFile(filepath.Join(tmpDir, "index.html"))
+	if err != nil {
+		t.Fatalf("Failed to read modified file: %v", err)
+	}
+
+	// Should contain an import map with lit
+	if !strings.Contains(string(content), "importmap") {
+		t.Error("Expected import map script tag to be inserted")
+	}
+	if !strings.Contains(string(content), "\"lit\"") {
+		t.Error("Expected 'lit' in import map")
+	}
+}
+
+func TestInjectJSONFormat(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "inject", "with-existing")
+	globPattern := filepath.Join(fixtureDir, "*.html")
+
+	stdout, stderr, code := runCLI(t, "inject", "--glob", globPattern, "--package", fixtureDir, "--dry-run", "--format", "json")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	// Should output JSON lines
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	for _, line := range lines {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			// The last line might be stats, try parsing that
+			var stats map[string]int
+			if err := json.Unmarshal([]byte(line), &stats); err != nil {
+				t.Fatalf("Failed to parse JSON line: %v\nline: %s", err, line)
+			}
+		}
+	}
+}
+
+// Helper functions for copying files/dirs
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %v", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		t.Fatalf("Failed to write %s: %v", dst, err)
+	}
+}
+
+func copyDir(t *testing.T, src, dst string) {
+	t.Helper()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("Failed to read dir %s: %v", src, err)
+	}
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		t.Fatalf("Failed to create dir %s: %v", dst, err)
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			copyDir(t, srcPath, dstPath)
+		} else {
+			copyFile(t, srcPath, dstPath)
+		}
+	}
+}

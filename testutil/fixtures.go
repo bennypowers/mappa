@@ -27,6 +27,7 @@ import (
 	"bennypowers.dev/mappa/internal/mapfs"
 )
 
+// updateGolden enables updating golden files with actual output when -update flag is set.
 var updateGolden = flag.Bool("update", false, "update golden files with actual output")
 
 // NewFixtureFS loads fixture files from testdata and returns a MapFileSystem
