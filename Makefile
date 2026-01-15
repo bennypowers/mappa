@@ -10,6 +10,16 @@ else
     RACE_LDFLAGS :=
 endif
 
+all:
+	go build ./... -o mappa
+
+install: all
+	cp mappa ~/.local/bin/mappa
+
+clean:
+	rm -f mappa
+	go clean -cache -testcache
+
 test:
 	gotestsum -- -race $(RACE_LDFLAGS) ./...
 
