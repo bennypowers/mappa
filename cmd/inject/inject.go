@@ -32,7 +32,8 @@ import (
 	"bennypowers.dev/mappa/inject"
 )
 
-// Cmd is the inject command.
+// Cmd is the inject cobra command that traces HTML files and updates
+// their import map script tags in-place with per-file minimal import maps.
 var Cmd = &cobra.Command{
 	Use:   "inject",
 	Short: "Trace HTML files and inject import maps in-place",

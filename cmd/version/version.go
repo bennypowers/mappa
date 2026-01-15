@@ -27,7 +27,7 @@ import (
 	"bennypowers.dev/mappa/internal/version"
 )
 
-// Cmd is the version command.
+// Cmd is the version cobra command that prints version and build information.
 var Cmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",

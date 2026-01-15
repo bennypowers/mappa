@@ -14,6 +14,10 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+
+// Package inject provides import map injection for HTML files.
+// It traces module imports and writes minimal import maps directly into
+// HTML files, updating existing import map script tags or inserting new ones.
 package inject
 
 import (

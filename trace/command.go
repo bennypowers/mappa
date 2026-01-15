@@ -14,6 +14,10 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+
+// Package trace provides module graph tracing for ES module import analysis.
+// It parses HTML and JavaScript files to extract import dependencies and
+// generate minimal import maps.
 package trace
 
 import (

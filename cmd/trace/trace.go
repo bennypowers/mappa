@@ -33,7 +33,8 @@ import (
 	"bennypowers.dev/mappa/trace"
 )
 
-// Cmd is the trace command.
+// Cmd is the trace cobra command that analyzes HTML files to find ES module
+// imports and generates minimal import maps containing only the specifiers used.
 var Cmd = &cobra.Command{
 	Use:   "trace [file.html...]",
 	Short: "Trace HTML files and generate minimal import maps",

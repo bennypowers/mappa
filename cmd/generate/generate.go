@@ -31,7 +31,7 @@ import (
 	"bennypowers.dev/mappa/resolve/local"
 )
 
-// Cmd is the generate command.
+// Cmd is the generate cobra command that creates import maps from package.json dependencies.
 var Cmd = &cobra.Command{
 	Use:   "generate",
 	Short: "Generate import map from package.json",
