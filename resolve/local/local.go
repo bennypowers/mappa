@@ -785,11 +785,6 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 
 		// Handle wildcard exports (trailing slash imports)
 		wildcards := depPkg.WildcardExports(opts)
-		// Determine if we should use a trailing-slash key:
-		// 1. Package explicitly supports trailing-slash and has no wildcards, OR
-		// 2. Package has exactly one "./*" wildcard (equivalent to trailing-slash)
-		hasSimpleWildcard := len(wildcards) == 1 && wildcards[0].Pattern == "./*"
-		hasTrailingSlash := (depPkg.HasTrailingSlashExport(opts) && len(wildcards) == 0) || hasSimpleWildcard
 
 		// Add trailing-slash keys for wildcard exports
 		for _, w := range wildcards {
@@ -798,8 +793,8 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			scopeEntries[importKey] = r.template.Expand(depName, "", w.Target)
 		}
 
-		// For packages with no exports, add trailing-slash key
-		if hasTrailingSlash && len(wildcards) == 0 {
+		// For packages with no wildcards but trailing-slash support, add trailing-slash key
+		if len(wildcards) == 0 && depPkg.HasTrailingSlashExport(opts) {
 			scopeEntries[depName+"/"] = r.template.Expand(depName, "", "")
 		}
 

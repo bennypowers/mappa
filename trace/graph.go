@@ -18,6 +18,7 @@ package trace
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -267,6 +268,7 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 
 // getPackageJSON returns a cached package.json, parsing and caching it if needed.
 // Returns nil if the package.json doesn't exist or can't be parsed.
+// Parse errors (as opposed to missing files) are logged to stderr for debugging.
 func (t *Tracer) getPackageJSON(pkgJSONPath string) *packagejson.PackageJSON {
 	// Check cache first
 	if cached, ok := t.pkgCache.Load(pkgJSONPath); ok {
@@ -279,6 +281,10 @@ func (t *Tracer) getPackageJSON(pkgJSONPath string) *packagejson.PackageJSON {
 	// Parse and cache
 	pkg, err := packagejson.ParseFile(t.fs, pkgJSONPath)
 	if err != nil {
+		// Log parse errors (not missing files) to help with debugging
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", pkgJSONPath, err)
+		}
 		t.pkgCache.Store(pkgJSONPath, nil) // Cache negative result
 		return nil
 	}
