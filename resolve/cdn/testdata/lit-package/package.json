@@ -1,0 +1,8 @@
+{
+  "name": "lit",
+  "version": "3.0.0",
+  "exports": {
+    ".": {"import": "./index.js"},
+    "./decorators.js": {"import": "./decorators.js"}
+  }
+}

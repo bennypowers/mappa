@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "lit": "https://esm.sh/lit@3.0.0/index.js",
+    "lit/decorators.js": "https://esm.sh/lit@3.0.0/decorators.js"
+  }
+}
