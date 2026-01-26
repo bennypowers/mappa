@@ -2,6 +2,8 @@
 
 The high-performance import map generator for the modern web, available as a CLI tool and Go library.
 
+**[Try the web demo](https://bennypowers.github.io/mappa/)** - Generate import maps directly in your browser.
+
 ![mappa - import map generator](./docs/images/mappa.png)
 
 > *Mappa* (מַפָּה) is Hebrew for "map".

@@ -21,8 +21,8 @@ package cdn
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
+
+	"github.com/tinywasm/fetch"
 )
 
 // Fetcher provides an abstraction over HTTP fetching.
@@ -32,53 +32,45 @@ type Fetcher interface {
 	Fetch(ctx context.Context, url string) ([]byte, error)
 }
 
-// HTTPFetcher implements Fetcher using net/http.
-// Works in both native and WASM builds (WASM uses browser Fetch API automatically).
-type HTTPFetcher struct {
-	client *http.Client
-}
+// HTTPFetcher implements Fetcher using tinywasm/fetch.
+// Works in both native and WASM builds with minimal binary size.
+type HTTPFetcher struct{}
 
 // NewHTTPFetcher creates a new HTTP fetcher.
 func NewHTTPFetcher() *HTTPFetcher {
-	return &HTTPFetcher{
-		client: &http.Client{},
-	}
-}
-
-// NewHTTPFetcherWithClient creates a new HTTP fetcher with a custom client.
-func NewHTTPFetcherWithClient(client *http.Client) *HTTPFetcher {
-	return &HTTPFetcher{
-		client: client,
-	}
+	return &HTTPFetcher{}
 }
 
 // Fetch retrieves content from the given URL.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, &FetchError{URL: url, Message: err.Error()}
+	type result struct {
+		body []byte
+		err  error
 	}
+	done := make(chan result, 1)
 
-	resp, err := f.client.Do(req)
-	if err != nil {
-		return nil, &FetchError{URL: url, Message: err.Error()}
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, &FetchError{
-			URL:        url,
-			StatusCode: resp.StatusCode,
-			Message:    resp.Status,
+	fetch.Get(url).Send(func(resp *fetch.Response, err error) {
+		if err != nil {
+			done <- result{nil, &FetchError{URL: url, Message: err.Error()}}
+			return
 		}
-	}
+		if resp.Status != 200 {
+			done <- result{nil, &FetchError{
+				URL:        url,
+				StatusCode: resp.Status,
+				Message:    fmt.Sprintf("HTTP %d", resp.Status),
+			}}
+			return
+		}
+		done <- result{resp.Body(), nil}
+	})
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, &FetchError{URL: url, Message: err.Error()}
+	select {
+	case r := <-done:
+		return r.body, r.err
+	case <-ctx.Done():
+		return nil, &FetchError{URL: url, Message: ctx.Err().Error()}
 	}
-
-	return body, nil
 }
 
 // FetchError represents an HTTP fetch error with status information.
