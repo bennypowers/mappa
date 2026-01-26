@@ -21,6 +21,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"bennypowers.dev/mappa/testutil"
 )
 
 // MockFetcher is a test implementation of the Fetcher interface.
@@ -226,18 +228,10 @@ func TestMatchTildeRange(t *testing.T) {
 }
 
 func TestRegistryResolveVersion(t *testing.T) {
+	litRegistry := testutil.LoadFixtureFile(t, "lit_registry.json")
+
 	mockFetcher := NewMockFetcher()
-	mockFetcher.AddResponse("https://registry.npmjs.org/lit", []byte(`{
-		"name": "lit",
-		"dist-tags": {
-			"latest": "3.0.0"
-		},
-		"versions": {
-			"2.0.0": {},
-			"2.1.0": {},
-			"3.0.0": {}
-		}
-	}`))
+	mockFetcher.AddResponse("https://registry.npmjs.org/lit", litRegistry)
 
 	registry := NewRegistry(mockFetcher)
 	ctx := context.Background()

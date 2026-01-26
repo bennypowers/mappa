@@ -19,11 +19,11 @@ package cdn
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
 	"bennypowers.dev/mappa/packagejson"
+	"bennypowers.dev/mappa/testutil"
 )
 
 // MockFetcher is a test implementation of the Fetcher interface.
@@ -60,15 +60,9 @@ func (m *MockFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 func TestResolverResolvePackageJSON(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
-	// Load fixtures
-	litRegistry, err := os.ReadFile("testdata/lit-registry/response.json")
-	if err != nil {
-		t.Fatalf("Failed to read lit-registry fixture: %v", err)
-	}
-	litPackage, err := os.ReadFile("testdata/lit-package/package.json")
-	if err != nil {
-		t.Fatalf("Failed to read lit-package fixture: %v", err)
-	}
+	// Load fixtures using testutil
+	litRegistry := testutil.LoadFixtureFile(t, "lit-registry/response.json")
+	litPackage := testutil.LoadFixtureFile(t, "lit-package/package.json")
 
 	mockFetcher.AddResponse("https://registry.npmjs.org/lit", litRegistry)
 	mockFetcher.AddResponse("https://esm.sh/lit@3.0.0/package.json", litPackage)
@@ -104,17 +98,12 @@ func TestResolverResolvePackageJSON(t *testing.T) {
 func TestResolverWithProvider(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
-	// Mock for unpkg
-	mockFetcher.AddResponse("https://registry.npmjs.org/preact", []byte(`{
-		"name": "preact",
-		"dist-tags": {"latest": "10.0.0"},
-		"versions": {"10.0.0": {"version": "10.0.0"}}
-	}`))
-	mockFetcher.AddResponse("https://unpkg.com/preact@10.0.0/package.json", []byte(`{
-		"name": "preact",
-		"version": "10.0.0",
-		"main": "dist/preact.mjs"
-	}`))
+	// Load fixtures for unpkg
+	preactRegistry := testutil.LoadFixtureFile(t, "preact-registry/response.json")
+	preactPackage := testutil.LoadFixtureFile(t, "preact-package/package.json")
+
+	mockFetcher.AddResponse("https://registry.npmjs.org/preact", preactRegistry)
+	mockFetcher.AddResponse("https://unpkg.com/preact@10.0.0/package.json", preactPackage)
 
 	resolver := New(mockFetcher).
 		WithProvider(mappacdn.Unpkg).
@@ -142,22 +131,12 @@ func TestResolverWithProvider(t *testing.T) {
 func TestResolverWithConditions(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
-	mockFetcher.AddResponse("https://registry.npmjs.org/test-pkg", []byte(`{
-		"name": "test-pkg",
-		"dist-tags": {"latest": "1.0.0"},
-		"versions": {"1.0.0": {"version": "1.0.0"}}
-	}`))
-	mockFetcher.AddResponse("https://esm.sh/test-pkg@1.0.0/package.json", []byte(`{
-		"name": "test-pkg",
-		"version": "1.0.0",
-		"exports": {
-			".": {
-				"node": "./node.js",
-				"browser": "./browser.js",
-				"default": "./default.js"
-			}
-		}
-	}`))
+	// Load fixtures
+	testPkgRegistry := testutil.LoadFixtureFile(t, "test-pkg-registry/response.json")
+	testPkgPackage := testutil.LoadFixtureFile(t, "test-pkg-package/package.json")
+
+	mockFetcher.AddResponse("https://registry.npmjs.org/test-pkg", testPkgRegistry)
+	mockFetcher.AddResponse("https://esm.sh/test-pkg@1.0.0/package.json", testPkgPackage)
 
 	ctx := context.Background()
 	pkg := &packagejson.PackageJSON{
@@ -185,26 +164,16 @@ func TestResolverWithConditions(t *testing.T) {
 func TestResolverWithIncludeDev(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
-	mockFetcher.AddResponse("https://registry.npmjs.org/prod-pkg", []byte(`{
-		"name": "prod-pkg",
-		"dist-tags": {"latest": "1.0.0"},
-		"versions": {"1.0.0": {}}
-	}`))
-	mockFetcher.AddResponse("https://esm.sh/prod-pkg@1.0.0/package.json", []byte(`{
-		"name": "prod-pkg",
-		"version": "1.0.0",
-		"main": "index.js"
-	}`))
-	mockFetcher.AddResponse("https://registry.npmjs.org/dev-pkg", []byte(`{
-		"name": "dev-pkg",
-		"dist-tags": {"latest": "1.0.0"},
-		"versions": {"1.0.0": {}}
-	}`))
-	mockFetcher.AddResponse("https://esm.sh/dev-pkg@1.0.0/package.json", []byte(`{
-		"name": "dev-pkg",
-		"version": "1.0.0",
-		"main": "index.js"
-	}`))
+	// Load fixtures
+	prodPkgRegistry := testutil.LoadFixtureFile(t, "prod-pkg-registry/response.json")
+	prodPkgPackage := testutil.LoadFixtureFile(t, "prod-pkg-package/package.json")
+	devPkgRegistry := testutil.LoadFixtureFile(t, "dev-pkg-registry/response.json")
+	devPkgPackage := testutil.LoadFixtureFile(t, "dev-pkg-package/package.json")
+
+	mockFetcher.AddResponse("https://registry.npmjs.org/prod-pkg", prodPkgRegistry)
+	mockFetcher.AddResponse("https://esm.sh/prod-pkg@1.0.0/package.json", prodPkgPackage)
+	mockFetcher.AddResponse("https://registry.npmjs.org/dev-pkg", devPkgRegistry)
+	mockFetcher.AddResponse("https://esm.sh/dev-pkg@1.0.0/package.json", devPkgPackage)
 
 	ctx := context.Background()
 	pkg := &packagejson.PackageJSON{
