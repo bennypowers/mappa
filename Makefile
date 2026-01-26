@@ -1,6 +1,7 @@
 .PHONY: all test lint clean install
 .PHONY: linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64
 .PHONY: build-shared-windows-image
+.PHONY: wasm wasm-release wasm-serve
 
 BINARY_NAME := mappa
 DIST_DIR := dist/bin
@@ -102,3 +103,20 @@ win32-arm64: build-shared-windows-image
 		-e CXX=aarch64-w64-mingw32-g++ \
 		$(SHARED_WINDOWS_CC_IMAGE) \
 		go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-win32-arm64.exe .
+
+# WASM build targets (no CGO required)
+# Note: trace package is excluded (uses tree-sitter CGO), only generate functionality is available
+
+wasm:
+	GOOS=js GOARCH=wasm go build -o web/mappa.wasm ./wasm
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
+	@echo "WASM build complete: web/mappa.wasm"
+
+wasm-release:
+	GOOS=js GOARCH=wasm go build $(GO_BUILD_FLAGS) -o web/mappa.wasm ./wasm
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
+	@echo "WASM release build complete: web/mappa.wasm"
+
+wasm-serve: wasm
+	@echo "Serving WASM demo at http://localhost:8080"
+	python3 -m http.server 8080 -d web

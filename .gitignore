@@ -8,6 +8,10 @@ mappa_test
 *.so
 *.dylib
 
+# WASM build artifacts in web/
+web/wasm_exec.js
+web/mappa.wasm
+
 # Test binary, built with `go test -c`
 *.test
 

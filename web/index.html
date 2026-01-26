@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mappa - Import Map Generator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>Mappa</h1>
+        <p class="subtitle">Generate import maps from package.json</p>
+    </header>
+
+    <main>
+        <section class="input-section">
+            <div class="form-group">
+                <label for="package-json">package.json</label>
+                <textarea id="package-json" placeholder='{
+  "name": "my-app",
+  "dependencies": {
+    "lit": "^3.0.0",
+    "preact": "^10.0.0"
+  }
+}'></textarea>
+            </div>
+
+            <div class="options">
+                <div class="form-group">
+                    <label for="cdn-select">CDN Provider</label>
+                    <select id="cdn-select">
+                        <option value="esm.sh" selected>esm.sh</option>
+                        <option value="unpkg">unpkg</option>
+                        <option value="jsdelivr">jsDelivr</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="conditions">Export Conditions</label>
+                    <input type="text" id="conditions" placeholder="browser, import, default" value="browser, import, default">
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="include-dev">
+                        Include devDependencies
+                    </label>
+                </div>
+            </div>
+
+            <button id="generate-btn" disabled>Generate Import Map</button>
+        </section>
+
+        <section class="output-section">
+            <div class="output-header">
+                <label>Import Map</label>
+                <button id="copy-btn" disabled>Copy</button>
+            </div>
+            <pre id="output"><code>Loading WASM...</code></pre>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            <a href="https://github.com/bennypowers/mappa" target="_blank">GitHub</a>
+            <span class="separator">|</span>
+            <span id="version">WASM v0.0.0</span>
+        </p>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
