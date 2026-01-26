@@ -18,6 +18,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cdn
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -130,28 +131,8 @@ func TestProviderTemplates(t *testing.T) {
 
 // expandTemplate is a helper for testing template expansion.
 func expandTemplate(tmpl, pkg, version, path string) string {
-	result := tmpl
-	result = replaceAll(result, "{package}", pkg)
-	result = replaceAll(result, "{version}", version)
-	result = replaceAll(result, "{path}", path)
+	result := strings.ReplaceAll(tmpl, "{package}", pkg)
+	result = strings.ReplaceAll(result, "{version}", version)
+	result = strings.ReplaceAll(result, "{path}", path)
 	return result
-}
-
-func replaceAll(s, old, new string) string {
-	for {
-		i := indexOf(s, old)
-		if i < 0 {
-			return s
-		}
-		s = s[:i] + new + s[i+len(old):]
-	}
-}
-
-func indexOf(s, substr string) int {
-	for i := range len(s) - len(substr) + 1 {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }

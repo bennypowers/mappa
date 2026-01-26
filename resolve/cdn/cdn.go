@@ -269,7 +269,7 @@ func (r *Resolver) resolvePackage(
 	r.addPackageImports(im, mu, pkgName, version, pkg)
 
 	// Resolve transitive dependencies if enabled
-	if r.resolveScope && depth == 0 && len(pkg.Dependencies) > 0 {
+	if r.resolveScope && (r.maxDepth == 0 || depth < r.maxDepth) && len(pkg.Dependencies) > 0 {
 		scopeKey := r.template.Expand(pkgName, version, "")
 		if !strings.HasSuffix(scopeKey, "/") {
 			scopeKey += "/"
@@ -311,8 +311,8 @@ func (r *Resolver) resolvePackage(
 				maps.Copy(scopeEntries, entries)
 				scopeMu.Unlock()
 
-				// Recursively resolve deeper dependencies
-				if err := r.resolvePackage(ctx, im, mu, visited, name, ver, depth+1); err != nil {
+				// Recursively resolve deeper dependencies using resolved version
+				if err := r.resolvePackage(ctx, im, mu, visited, name, resolvedVer, depth+1); err != nil {
 					if r.logger != nil {
 						r.logger.Warning("Failed to resolve transitive dep %s: %v", name, err)
 					}

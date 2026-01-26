@@ -119,4 +119,5 @@ wasm-release:
 
 wasm-serve: wasm
 	@echo "Serving WASM demo at http://localhost:8080"
+	# Requires Python 3 for the simple HTTP server
 	python3 -m http.server 8080 -d web

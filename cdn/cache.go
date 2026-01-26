@@ -75,9 +75,17 @@ func (c *PackageCache) Set(pkgName, version string, pkg *packagejson.PackageJSON
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if already exists
+	// Check if already exists - update entry and refresh LRU order
 	if _, exists := c.entries[key]; exists {
 		c.entries[key] = &cacheEntry{pkg: pkg}
+		// Move key to end of order slice (most recently used)
+		for i, k := range c.order {
+			if k == key {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		c.order = append(c.order, key)
 		return
 	}
 
@@ -102,12 +110,11 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 	entry, ok := c.entries[key]
 	c.mu.RUnlock()
 
-	if ok {
-		entry.once.Do(func() {}) // Ensure once completed
-		if entry.err != nil {
-			return nil, entry.err
-		}
+	if ok && entry.pkg != nil {
 		return entry.pkg, nil
+	}
+	if ok && entry.err != nil {
+		return nil, entry.err
 	}
 
 	// Slow path: create entry and load
@@ -128,7 +135,7 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 	c.entries[key] = entry
 
 	// Evict oldest if at capacity
-	if len(c.entries) > c.maxSize {
+	if len(c.entries) >= c.maxSize {
 		oldest := c.order[0]
 		c.order = c.order[1:]
 		delete(c.entries, oldest)

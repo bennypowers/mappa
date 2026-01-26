@@ -19,6 +19,7 @@ package cdn
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
@@ -59,22 +60,18 @@ func (m *MockFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 func TestResolverResolvePackageJSON(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
-	// Mock registry response for lit
-	mockFetcher.AddResponse("https://registry.npmjs.org/lit", []byte(`{
-		"name": "lit",
-		"dist-tags": {"latest": "3.0.0"},
-		"versions": {"3.0.0": {"version": "3.0.0"}}
-	}`))
+	// Load fixtures
+	litRegistry, err := os.ReadFile("testdata/lit-registry/response.json")
+	if err != nil {
+		t.Fatalf("Failed to read lit-registry fixture: %v", err)
+	}
+	litPackage, err := os.ReadFile("testdata/lit-package/package.json")
+	if err != nil {
+		t.Fatalf("Failed to read lit-package fixture: %v", err)
+	}
 
-	// Mock package.json response for lit
-	mockFetcher.AddResponse("https://esm.sh/lit@3.0.0/package.json", []byte(`{
-		"name": "lit",
-		"version": "3.0.0",
-		"exports": {
-			".": {"import": "./index.js"},
-			"./decorators.js": {"import": "./decorators.js"}
-		}
-	}`))
+	mockFetcher.AddResponse("https://registry.npmjs.org/lit", litRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lit@3.0.0/package.json", litPackage)
 
 	resolver := New(mockFetcher).WithMaxDepth(1)
 	ctx := context.Background()
@@ -221,7 +218,10 @@ func TestResolverWithIncludeDev(t *testing.T) {
 
 	// Without includeDev
 	resolver := New(mockFetcher).WithMaxDepth(1)
-	im, _ := resolver.ResolvePackageJSON(ctx, pkg)
+	im, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
 
 	if im.Imports["prod-pkg"] == "" {
 		t.Error("Expected prod-pkg in imports")
@@ -232,7 +232,10 @@ func TestResolverWithIncludeDev(t *testing.T) {
 
 	// With includeDev
 	resolver = New(mockFetcher).WithIncludeDev(true).WithMaxDepth(1)
-	im, _ = resolver.ResolvePackageJSON(ctx, pkg)
+	im, err = resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON with includeDev error: %v", err)
+	}
 
 	if im.Imports["dev-pkg"] == "" {
 		t.Error("Expected dev-pkg in imports with includeDev")

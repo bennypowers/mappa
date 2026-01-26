@@ -78,6 +78,7 @@ async function generateImportMap() {
 
     generating = true;
     generateBtn.disabled = true;
+    copyBtn.disabled = true;
     generateBtn.textContent = 'Generating...';
     outputCode.textContent = 'Fetching package metadata...';
 
@@ -105,6 +106,7 @@ async function generateImportMap() {
 
 // Copy to clipboard
 async function copyOutput() {
+    if (generating) return;
     try {
         await navigator.clipboard.writeText(outputCode.textContent);
         const originalText = copyBtn.textContent;

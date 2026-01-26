@@ -17,8 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 package cdn
 
-import "slices"
-
 // Provider represents a CDN provider with URL templates for package resolution.
 type Provider struct {
 	Name string
@@ -78,6 +76,7 @@ func ProviderNames() []string {
 }
 
 // IsValidProvider returns true if the provider name is recognized.
+// It honors the same aliases as ProviderByName.
 func IsValidProvider(name string) bool {
-	return slices.Contains(ProviderNames(), name)
+	return ProviderByName(name) != nil
 }

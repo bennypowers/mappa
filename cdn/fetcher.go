@@ -42,6 +42,8 @@ func NewHTTPFetcher() *HTTPFetcher {
 }
 
 // Fetch retrieves content from the given URL.
+// Note: Context cancellation stops waiting for the response but does not
+// abort the underlying HTTP request due to the async callback pattern.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 	type result struct {
 		body []byte

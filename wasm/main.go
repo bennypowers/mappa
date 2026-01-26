@@ -74,7 +74,9 @@ func generate(this js.Value, args []js.Value) any {
 		return nil
 	})
 
-	return js.Global().Get("Promise").New(handler)
+	promise := js.Global().Get("Promise").New(handler)
+	handler.Release()
+	return promise
 }
 
 // doGenerate performs the actual import map generation.

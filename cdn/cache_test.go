@@ -143,17 +143,27 @@ func TestPackageCacheConcurrency(t *testing.T) {
 	cache := NewPackageCache(100)
 
 	var wg sync.WaitGroup
-	for i := range 50 {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			pkg := &packagejson.PackageJSON{Name: "pkg", Version: "1.0.0"}
 			cache.Set("pkg", "1.0.0", pkg)
 			cache.Get("pkg", "1.0.0")
 			_, _ = cache.GetOrLoad("pkg", "1.0.0", func() (*packagejson.PackageJSON, error) {
 				return pkg, nil
 			})
-		}(i)
+		})
 	}
 	wg.Wait()
+
+	// Verify cache integrity after concurrent access
+	got, ok := cache.Get("pkg", "1.0.0")
+	if !ok {
+		t.Error("Expected cache entry to exist after concurrent operations")
+	}
+	if got == nil || got.Name != "pkg" || got.Version != "1.0.0" {
+		t.Errorf("Cache entry corrupted: got %+v", got)
+	}
+	if cache.Size() != 1 {
+		t.Errorf("Expected cache size 1, got %d", cache.Size())
+	}
 }

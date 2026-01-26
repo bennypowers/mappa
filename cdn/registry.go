@@ -50,9 +50,12 @@ type RegistryVersion struct {
 }
 
 // VersionCache caches resolved versions to avoid repeated registry lookups.
+// Has a maximum size with LRU eviction to prevent unbounded memory growth.
 type VersionCache struct {
 	mu      sync.RWMutex
 	entries map[string]string // pkgName@range -> resolved version
+	order   []string          // LRU order tracking
+	maxSize int
 }
 
 // NewRegistry creates a new npm registry client.
@@ -73,10 +76,20 @@ func NewRegistryWithURL(fetcher Fetcher, baseURL string) *Registry {
 	}
 }
 
-// NewVersionCache creates a new version cache.
+// NewVersionCache creates a new version cache with default max size.
 func NewVersionCache() *VersionCache {
+	return NewVersionCacheWithSize(1000)
+}
+
+// NewVersionCacheWithSize creates a new version cache with the specified max size.
+func NewVersionCacheWithSize(maxSize int) *VersionCache {
+	if maxSize <= 0 {
+		maxSize = 1000
+	}
 	return &VersionCache{
 		entries: make(map[string]string),
+		order:   make([]string, 0, maxSize),
+		maxSize: maxSize,
 	}
 }
 
@@ -94,7 +107,29 @@ func (c *VersionCache) Set(pkgName, versionRange, resolvedVersion string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := pkgName + "@" + versionRange
+
+	// Update existing entry and refresh LRU order
+	if _, exists := c.entries[key]; exists {
+		c.entries[key] = resolvedVersion
+		for i, k := range c.order {
+			if k == key {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		c.order = append(c.order, key)
+		return
+	}
+
+	// Evict oldest if at capacity
+	if len(c.entries) >= c.maxSize {
+		oldest := c.order[0]
+		c.order = c.order[1:]
+		delete(c.entries, oldest)
+	}
+
 	c.entries[key] = resolvedVersion
+	c.order = append(c.order, key)
 }
 
 // ResolveVersion resolves a semver range to a specific version.
@@ -205,14 +240,15 @@ func parseSemver(version string) (*SemVer, error) {
 
 // compareSemver compares two semver strings.
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
+// Returns 0 if either version cannot be parsed.
 func compareSemver(a, b string) int {
 	av, err := parseSemver(a)
 	if err != nil {
-		return -1
+		return 0
 	}
 	bv, err := parseSemver(b)
 	if err != nil {
-		return 1
+		return 0
 	}
 
 	if av.Major != bv.Major {
@@ -242,13 +278,69 @@ func compareSemver(a, b string) int {
 		return 1
 	}
 	if av.Prerelease != bv.Prerelease {
-		if av.Prerelease < bv.Prerelease {
+		return comparePrereleases(av.Prerelease, bv.Prerelease)
+	}
+
+	return 0
+}
+
+// comparePrereleases compares two prerelease strings according to SemVer 2.0.0.
+// Identifiers are split by '.' and compared: numeric identifiers are compared as integers,
+// non-numeric identifiers are compared lexically, numeric has lower precedence than non-numeric,
+// and shorter identifier lists have lower precedence when all preceding identifiers are equal.
+func comparePrereleases(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+
+	for i := 0; i < len(aParts) && i < len(bParts); i++ {
+		aPart := aParts[i]
+		bPart := bParts[i]
+
+		aNum, aIsNum := parseNum(aPart)
+		bNum, bIsNum := parseNum(bPart)
+
+		if aIsNum && bIsNum {
+			// Both numeric: compare as integers
+			if aNum != bNum {
+				if aNum < bNum {
+					return -1
+				}
+				return 1
+			}
+		} else if aIsNum {
+			// Numeric has lower precedence than non-numeric
+			return -1
+		} else if bIsNum {
+			return 1
+		} else {
+			// Both non-numeric: compare lexically
+			if aPart != bPart {
+				if aPart < bPart {
+					return -1
+				}
+				return 1
+			}
+		}
+	}
+
+	// Shorter list has lower precedence
+	if len(aParts) != len(bParts) {
+		if len(aParts) < len(bParts) {
 			return -1
 		}
 		return 1
 	}
 
 	return 0
+}
+
+// parseNum attempts to parse a string as a non-negative integer.
+func parseNum(s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // matchVersion finds the best version matching a semver range.
@@ -319,8 +411,19 @@ func matchVersion(versions []string, versionRange string) string {
 	}
 
 	// Handle hyphen ranges (1.0.0 - 2.0.0)
+	// Use precise pattern: split and verify we get exactly 2 version-like parts
 	if strings.Contains(versionRange, " - ") {
-		return matchHyphenRange(versions, versionRange)
+		parts := strings.Split(versionRange, " - ")
+		if len(parts) == 2 {
+			lower := strings.TrimSpace(parts[0])
+			upper := strings.TrimSpace(parts[1])
+			// Verify both parts look like versions (start with digit or 'v')
+			if len(lower) > 0 && len(upper) > 0 &&
+				(lower[0] >= '0' && lower[0] <= '9' || lower[0] == 'v') &&
+				(upper[0] >= '0' && upper[0] <= '9' || upper[0] == 'v') {
+				return matchHyphenRange(versions, versionRange)
+			}
+		}
 	}
 
 	// Handle space-separated ranges (intersection)

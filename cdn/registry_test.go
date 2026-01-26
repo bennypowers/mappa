@@ -176,6 +176,12 @@ func TestMatchCaretRange(t *testing.T) {
 			"0.0.1",
 			"0.0.2",
 		},
+		{
+			"zero major zero minor higher base",
+			[]string{"0.0.1", "0.0.2", "0.0.3", "0.1.0"},
+			"0.0.2",
+			"0.0.3",
+		},
 	}
 
 	for _, tt := range tests {
