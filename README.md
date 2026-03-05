@@ -23,12 +23,21 @@ Mappa generates import maps from your `package.json` dependencies, pointing to y
 
 ## Installation
 
+### Gentoo Linux
+
+Enable the `bennypowers` overlay, then install:
+
+```bash
+eselect repository enable bennypowers
+emaint sync -r bennypowers
+emerge dev-util/mappa
+```
+
 ### From Source
 
 ```bash
 go install bennypowers.dev/mappa@latest
 ```
-
 
 ## Quick Start
 
