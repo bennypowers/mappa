@@ -130,10 +130,13 @@ document.querySelector('npm-search').addEventListener('npm-add', (e) => {
         } catch {
             return; // don't clobber invalid JSON the user is editing
         }
+        if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return;
     } else {
         pkg = { name: 'my-app', dependencies: {} };
     }
-    if (!pkg.dependencies) pkg.dependencies = {};
+    if (!pkg.dependencies || typeof pkg.dependencies !== 'object' || Array.isArray(pkg.dependencies)) {
+        pkg.dependencies = {};
+    }
     pkg.dependencies[name] = version;
     packageJsonInput.value = JSON.stringify(pkg, null, 2);
 });

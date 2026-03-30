@@ -39,6 +39,7 @@ class NpmSearch extends HTMLElement {
     this.#addBtn.disabled = true;
 
     clearTimeout(this.#debounceId);
+    this.#searchController?.abort();
     const query = this.#input.value.trim();
     if (query.length < 2) {
       this.#hideListbox();
@@ -76,6 +77,7 @@ class NpmSearch extends HTMLElement {
       const url = `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(query)}&size=10`;
       const res = await fetch(url, { signal: this.#searchController.signal });
       const data = await res.json();
+      if (this.#input.value.trim() !== query) return;
       this.#showResults(data.objects.map(o => o.package));
     } catch (err) {
       if (err.name !== 'AbortError') console.error('npm search failed:', err);
@@ -91,8 +93,17 @@ class NpmSearch extends HTMLElement {
       li.role = 'option';
       li.id = `opt-${i}`;
       li.dataset.name = pkg.name;
-      li.innerHTML = `<strong>${pkg.name}</strong> <span>${pkg.version}</span>`;
-      if (pkg.description) li.innerHTML += `<br><small>${pkg.description}</small>`;
+      const nameEl = document.createElement('strong');
+      nameEl.textContent = pkg.name;
+      const versionEl = document.createElement('span');
+      versionEl.textContent = pkg.version;
+      li.append(nameEl, document.createTextNode(' '), versionEl);
+      if (pkg.description) {
+        li.append(document.createElement('br'));
+        const desc = document.createElement('small');
+        desc.textContent = pkg.description;
+        li.append(desc);
+      }
       li.addEventListener('click', () => this.#selectPackage(pkg.name));
       this.#listbox.append(li);
     }
@@ -128,6 +139,7 @@ class NpmSearch extends HTMLElement {
       const url = `https://registry.npmjs.org/${encodeURIComponent(name)}`;
       const res = await fetch(url, { headers: { Accept: 'application/vnd.npm.install-v1+json' } });
       const data = await res.json();
+      if (this.#selectedPackage !== name) return;
       const distTags = data['dist-tags'] || {};
       const versions = Object.keys(data.versions || {}).reverse();
 
@@ -149,6 +161,7 @@ class NpmSearch extends HTMLElement {
       this.#version.disabled = false;
       this.#addBtn.disabled = false;
     } catch (err) {
+      if (this.#selectedPackage !== name) return;
       console.error('Failed to fetch versions:', err);
       this.#version.innerHTML = '<option value="">error</option>';
     }
