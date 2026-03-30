@@ -15,6 +15,11 @@
     <main>
         <section class="input-section">
             <div class="form-group">
+                <label>Add Package</label>
+                <npm-search></npm-search>
+            </div>
+
+            <div class="form-group">
                 <label for="package-json">package.json</label>
                 <textarea id="package-json" placeholder='{
   "name": "my-app",
@@ -70,6 +75,91 @@
         </p>
     </footer>
 
+    <template id="npm-search-template">
+        <style>
+            :host { display: block; }
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            .search-row { display: flex; gap: 0.5rem; align-items: start; }
+            .combobox { flex: 1; position: relative; }
+            input[type="text"] {
+                width: 100%;
+                padding: 0.75rem;
+                font-family: var(--font-mono, monospace);
+                font-size: 0.9rem;
+                background: var(--bg-primary, #f5f5f7);
+                border: 1px solid var(--border, #d2d2d7);
+                border-radius: 4px;
+                color: var(--text-primary, #1d1d1f);
+            }
+            input:focus {
+                outline: 2px solid var(--accent, #d63050);
+                outline-offset: 2px;
+                border-color: var(--accent, #d63050);
+            }
+            [role="listbox"] {
+                position: absolute; top: 100%; left: 0; right: 0;
+                max-height: 300px; overflow-y: auto;
+                background: var(--bg-secondary, #fff);
+                border: 1px solid var(--border, #d2d2d7);
+                border-radius: 0 0 4px 4px;
+                list-style: none; z-index: 10;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            }
+            [role="option"] {
+                padding: 0.5rem 0.75rem; cursor: pointer;
+                font-size: 0.85rem;
+                border-bottom: 1px solid var(--border, #d2d2d7);
+            }
+            [role="option"]:last-child { border-bottom: none; }
+            [role="option"]:hover, [role="option"].active {
+                background: var(--bg-tertiary, #e5e5e7);
+            }
+            [role="option"] strong { color: var(--accent, #d63050); }
+            [role="option"] span { color: var(--text-secondary, #6e6e73); font-size: 0.8rem; }
+            [role="option"] small {
+                color: var(--text-secondary, #6e6e73);
+                display: block; margin-top: 0.15rem;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            }
+            select, button {
+                padding: 0.75rem;
+                font-family: var(--font-mono, monospace);
+                font-size: 0.9rem;
+                background: var(--bg-primary, #f5f5f7);
+                border: 1px solid var(--border, #d2d2d7);
+                border-radius: 4px;
+                color: var(--text-primary, #1d1d1f);
+            }
+            select { cursor: pointer; min-width: 10ch; }
+            select:focus, button:focus {
+                outline: 2px solid var(--accent, #d63050);
+                outline-offset: 2px;
+                border-color: var(--accent, #d63050);
+            }
+            select:disabled, button:disabled { opacity: 0.6; cursor: not-allowed; }
+            button {
+                font-weight: 600; cursor: pointer;
+                background: var(--accent, #d63050); color: white;
+                border: none; white-space: nowrap;
+                padding: 0.75rem 1.25rem;
+                transition: background 0.2s;
+            }
+            button:hover:not(:disabled) { background: var(--accent-hover, #e94560); }
+        </style>
+        <div class="search-row">
+            <div class="combobox" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-owns="listbox">
+                <input type="text" id="input" placeholder="Search npm packages..."
+                       autocomplete="off" aria-autocomplete="list" aria-controls="listbox">
+                <ul id="listbox" role="listbox" hidden></ul>
+            </div>
+            <select id="version" disabled aria-label="Package version">
+                <option value="">version</option>
+            </select>
+            <button id="add" type="button" disabled>Add</button>
+        </div>
+    </template>
+
+    <script type="module" src="npm-search.js"></script>
     <script type="module" src="app.js"></script>
 </body>
 </html>
