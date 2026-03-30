@@ -119,6 +119,28 @@ async function copyOutput() {
     }
 }
 
+// Handle package added from <npm-search>
+document.querySelector('npm-search').addEventListener('npm-add', (e) => {
+    const { name, version } = e.detail;
+    let pkg;
+    const current = packageJsonInput.value.trim();
+    if (current) {
+        try {
+            pkg = JSON.parse(current);
+        } catch {
+            return; // don't clobber invalid JSON the user is editing
+        }
+        if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return;
+    } else {
+        pkg = { name: 'my-app', dependencies: {} };
+    }
+    if (!pkg.dependencies || typeof pkg.dependencies !== 'object' || Array.isArray(pkg.dependencies)) {
+        pkg.dependencies = {};
+    }
+    pkg.dependencies[name] = version;
+    packageJsonInput.value = JSON.stringify(pkg, null, 2);
+});
+
 // Event listeners
 generateBtn.addEventListener('click', generateImportMap);
 copyBtn.addEventListener('click', copyOutput);
