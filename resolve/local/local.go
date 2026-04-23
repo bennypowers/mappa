@@ -651,7 +651,15 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 		sem     = make(chan struct{}, 10) // limit to 10 concurrent goroutines
 	)
 
+	excluded := make(map[string]bool, len(r.excludePackages))
+	for _, pkg := range r.excludePackages {
+		excluded[pkg] = true
+	}
+
 	for depName := range rootPkg.Dependencies {
+		if excluded[depName] {
+			continue
+		}
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
