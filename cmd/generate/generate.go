@@ -20,7 +20,6 @@ package generate
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -139,7 +138,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	if errs := outputMap.Validate(); len(errs) > 0 {
 		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", e)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", e)
 		}
 		if viper.GetBool("strict") {
 			return fmt.Errorf("import map has %d validation warning(s)", len(errs))
