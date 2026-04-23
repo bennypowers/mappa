@@ -235,11 +235,24 @@ func (im *ImportMap) Simplify() *ImportMap {
 			if len(simplified) == 0 {
 				continue
 			}
-			// Remove scope entries that are identical to top-level imports
+			// Remove scope entries redundant with top-level imports
 			if result.Imports != nil {
 				deduplicated := make(map[string]string)
 				for key, value := range simplified {
-					if topLevel, ok := result.Imports[key]; !ok || topLevel != value {
+					if topLevel, ok := result.Imports[key]; ok && topLevel == value {
+						continue
+					}
+					covered := false
+					for tlKey, tlValue := range result.Imports {
+						if !strings.HasSuffix(tlKey, "/") {
+							continue
+						}
+						if rel, ok := strings.CutPrefix(key, tlKey); ok && tlValue+rel == value {
+							covered = true
+							break
+						}
+					}
+					if !covered {
 						deduplicated[key] = value
 					}
 				}

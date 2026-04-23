@@ -242,16 +242,6 @@ func TestInjectBatch_MissingFile(t *testing.T) {
 
 func TestInjectBatch_MultipleFiles(t *testing.T) {
 	mfs := setupInjectFixture(t)
-	mfs.AddFile("/project/other.html", `<!DOCTYPE html>
-<html>
-<head>
-  <title>Other</title>
-  <script type="module">
-    import { LitElement } from 'lit';
-  </script>
-</head>
-<body></body>
-</html>`, 0644)
 
 	results := InjectBatch(mfs, []string{
 		"/project/index.html",
