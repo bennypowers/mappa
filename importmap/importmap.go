@@ -28,10 +28,10 @@ import (
 
 // ValidationError describes a spec violation in an import map.
 type ValidationError struct {
-	Key     string
-	Value   string
-	Scope   string // empty for top-level imports
-	Message string
+	Key     string `json:"key,omitempty"`
+	Value   string `json:"value,omitempty"`
+	Scope   string `json:"scope,omitempty"`
+	Message string `json:"message"`
 }
 
 func (e *ValidationError) Error() string {
