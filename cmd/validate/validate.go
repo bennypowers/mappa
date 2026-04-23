@@ -46,8 +46,9 @@ Exits 0 if the import map is valid, 1 if there are violations.`,
 
   # Machine-readable JSON output
   mappa validate importmap.json --format json`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: run,
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
+	RunE:         run,
 }
 
 func init() {
@@ -55,6 +56,11 @@ func init() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	format, _ := cmd.Flags().GetString("format")
+	if format != "text" && format != "json" {
+		return fmt.Errorf("invalid format %q: must be 'text' or 'json'", format)
+	}
+
 	var data []byte
 	var err error
 
@@ -78,11 +84,6 @@ func run(cmd *cobra.Command, args []string) error {
 
 	errs := im.Validate()
 
-	format, _ := cmd.Flags().GetString("format")
-	if format != "text" && format != "json" {
-		return fmt.Errorf("invalid format %q: must be 'text' or 'json'", format)
-	}
-
 	if format == "json" {
 		out, err := json.MarshalIndent(errs, "", "  ")
 		if err != nil {
@@ -96,6 +97,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(errs) > 0 {
+		cmd.SilenceErrors = true
 		return fmt.Errorf("import map has %d validation error(s)", len(errs))
 	}
 

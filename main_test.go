@@ -855,18 +855,19 @@ func TestValidateInvalid(t *testing.T) {
 func TestValidateStdin(t *testing.T) {
 	binary := filepath.Join(mustGetwd(), "mappa_test")
 	cmd := exec.Command(binary, "validate")
-	cmd.Stdin = strings.NewReader(`{
-  "imports": {
-    "lit": "/node_modules/lit/index.js"
-  }
-}`)
+
+	f, err := os.Open(filepath.Join("testdata", "validate", "valid", "input.json"))
+	if err != nil {
+		t.Fatalf("Failed to open fixture: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	cmd.Stdin = f
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	err := cmd.Run()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		t.Fatalf("Expected exit code 0 for valid stdin input, got error: %v\nstderr: %s", err, stderrBuf.String())
 	}
 }
@@ -874,18 +875,19 @@ func TestValidateStdin(t *testing.T) {
 func TestValidateStdinInvalid(t *testing.T) {
 	binary := filepath.Join(mustGetwd(), "mappa_test")
 	cmd := exec.Command(binary, "validate")
-	cmd.Stdin = strings.NewReader(`{
-  "imports": {
-    "lit/": "/node_modules/lit"
-  }
-}`)
+
+	f, err := os.Open(filepath.Join("testdata", "validate", "invalid", "input.json"))
+	if err != nil {
+		t.Fatalf("Failed to open fixture: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	cmd.Stdin = f
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	err := cmd.Run()
-	if err == nil {
+	if err := cmd.Run(); err == nil {
 		t.Fatal("Expected non-zero exit code for invalid stdin input")
 	}
 
@@ -913,10 +915,9 @@ func TestValidateFormatJSON(t *testing.T) {
 		t.Fatal("Expected non-empty JSON array of errors")
 	}
 
-	// Each error should have a Message field
 	for i, e := range errs {
-		if e["Message"] == nil {
-			t.Errorf("Error %d missing 'Message' field: %v", i, e)
+		if e["message"] == nil {
+			t.Errorf("Error %d missing 'message' field: %v", i, e)
 		}
 	}
 }
