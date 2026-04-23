@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "lit/": "/node_modules/lit",
+    "broken/": "node_modules/broken"
+  }
+}

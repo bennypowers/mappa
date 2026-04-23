@@ -58,6 +58,7 @@ func TestResolver(t *testing.T) {
 	}{
 		{"simple package", "simple-pkg"},
 		{"with scopes", "with-scopes"},
+		{"scope simplification with wildcards", "with-wildcard-scopes"},
 	}
 
 	for _, tt := range tests {

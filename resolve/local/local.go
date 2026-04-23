@@ -821,6 +821,9 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 		r.processPackageDependenciesParallelWithGraph(im, mu, visited, nodeModulesPath, depName, rootDir, graph)
 	}
 
+	// Simplify scope entries (remove entries covered by trailing-slash keys)
+	scopeEntries = importmap.SimplifyEntries(scopeEntries)
+
 	// Merge scope entries into import map (protected by mutex)
 	if len(scopeEntries) > 0 {
 		mu.Lock()

@@ -1,0 +1,10 @@
+{
+  "exports": {
+    ".": "esm/index.js",
+    "./utils": "browser/utils.js"
+  },
+  "default_only": {
+    ".": "fallback.js",
+    "./utils": "utils.js"
+  }
+}

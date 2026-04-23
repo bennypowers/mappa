@@ -464,6 +464,145 @@ func TestWorkspacePatterns(t *testing.T) {
 	}
 }
 
+func TestResolveExportNullTarget(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/null-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Exports map[string]string `json:"exports"`
+		Blocked []string          `json:"blocked"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for subpath, want := range expected.Exports {
+		t.Run("resolves "+subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, nil)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+
+	for _, blocked := range expected.Blocked {
+		t.Run("blocks "+blocked, func(t *testing.T) {
+			_, err := pkg.ResolveExport(blocked, nil)
+			if err != packagejson.ErrNotExported {
+				t.Errorf("ResolveExport(%q) should return ErrNotExported, got %v", blocked, err)
+			}
+		})
+	}
+
+	entries := pkg.ExportEntries(nil)
+	for _, e := range entries {
+		for _, blocked := range expected.Blocked {
+			if e.Subpath == blocked {
+				t.Errorf("ExportEntries should not include blocked subpath %q", blocked)
+			}
+		}
+	}
+}
+
+func TestResolveExportArrayFallback(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/array-fallback-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Exports     map[string]string `json:"exports"`
+		DefaultOnly map[string]string `json:"default_only"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for subpath, want := range expected.Exports {
+		t.Run("default conditions "+subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, nil)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+
+	defaultOpts := &packagejson.ResolveOptions{Conditions: []string{"default"}}
+	for subpath, want := range expected.DefaultOnly {
+		t.Run("default-only conditions "+subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, defaultOpts)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) with default-only failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+}
+
+func TestResolveExportNullCondition(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/mixed-null-and-valid", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		WithBrowser    string `json:"with_browser"`
+		WithoutBrowser string `json:"without_browser"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	t.Run("browser condition hits null", func(t *testing.T) {
+		_, err := pkg.ResolveExport(".", nil)
+		if err != packagejson.ErrNotExported {
+			t.Errorf("Expected ErrNotExported when browser condition is null, got %v", err)
+		}
+	})
+
+	t.Run("import condition skips null browser", func(t *testing.T) {
+		opts := &packagejson.ResolveOptions{Conditions: []string{"import", "default"}}
+		resolved, err := pkg.ResolveExport(".", opts)
+		if err != nil {
+			t.Fatalf("ResolveExport failed: %v", err)
+		}
+		if resolved != expected.WithoutBrowser {
+			t.Errorf("ResolveExport = %q, want %q", resolved, expected.WithoutBrowser)
+		}
+	})
+}
+
 func TestHasWorkspaces(t *testing.T) {
 	tests := []struct {
 		name     string

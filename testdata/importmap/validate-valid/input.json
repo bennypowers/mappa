@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "lit/": "/node_modules/lit/",
+    "@scope/pkg": "/node_modules/@scope/pkg/index.js"
+  }
+}

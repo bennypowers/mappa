@@ -20,9 +20,79 @@ package importmap
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"strings"
 )
+
+// ValidationError describes a spec violation in an import map.
+type ValidationError struct {
+	Key     string
+	Value   string
+	Scope   string // empty for top-level imports
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	if e.Scope != "" {
+		return fmt.Sprintf("scope %q key %q: %s", e.Scope, e.Key, e.Message)
+	}
+	return fmt.Sprintf("key %q: %s", e.Key, e.Message)
+}
+
+// Validate checks the import map for WHATWG spec violations.
+// Returns a slice of validation errors (empty if valid).
+func (im *ImportMap) Validate() []*ValidationError {
+	if im == nil {
+		return nil
+	}
+
+	var errs []*ValidationError
+	errs = append(errs, validateSpecifierMap(im.Imports, "")...)
+	for scope, imports := range im.Scopes {
+		errs = append(errs, validateSpecifierMap(imports, scope)...)
+	}
+	return errs
+}
+
+func validateSpecifierMap(imports map[string]string, scope string) []*ValidationError {
+	var errs []*ValidationError
+	for key, value := range imports {
+		keySlash := strings.HasSuffix(key, "/")
+		valueSlash := strings.HasSuffix(value, "/")
+		if keySlash && !valueSlash {
+			errs = append(errs, &ValidationError{
+				Key:     key,
+				Value:   value,
+				Scope:   scope,
+				Message: "trailing-slash key must map to a value ending with /",
+			})
+		}
+		if !isValidSpecifierValue(value) {
+			errs = append(errs, &ValidationError{
+				Key:     key,
+				Value:   value,
+				Scope:   scope,
+				Message: "value must be a valid URL or start with /, ./, or ../",
+			})
+		}
+	}
+	return errs
+}
+
+func isValidSpecifierValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "/") ||
+		strings.HasPrefix(value, "./") ||
+		strings.HasPrefix(value, "../") ||
+		strings.HasPrefix(value, "https://") ||
+		strings.HasPrefix(value, "http://") {
+		return true
+	}
+	return false
+}
 
 // ImportMap represents an ES module import map.
 type ImportMap struct {
@@ -174,6 +244,12 @@ func (im *ImportMap) Simplify() *ImportMap {
 	}
 
 	return result
+}
+
+// SimplifyEntries removes entries from a specifier map that are covered by
+// trailing-slash keys. Useful for simplifying scope entries independently.
+func SimplifyEntries(imports map[string]string) map[string]string {
+	return simplifyImports(imports)
 }
 
 // simplifyImports removes entries covered by trailing-slash keys.

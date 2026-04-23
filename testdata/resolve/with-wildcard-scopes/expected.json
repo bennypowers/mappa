@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "parent-pkg": "/node_modules/parent-pkg/index.js"
+  },
+  "scopes": {
+    "/node_modules/parent-pkg/": {
+      "dep-with-wildcards": "/node_modules/dep-with-wildcards/index.js",
+      "dep-with-wildcards/": "/node_modules/dep-with-wildcards/dist/"
+    }
+  }
+}

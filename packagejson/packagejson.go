@@ -310,8 +310,7 @@ func (pkg *PackageJSON) WildcardExports(opts *ResolveOptions) []WildcardExport {
 
 		// Extract the prefix before the wildcard
 		target := trimDotSlash(targetStr)
-		wildcardIdx := strings.Index(target, "*")
-		targetPrefix := target[:wildcardIdx]
+		targetPrefix, _, _ := strings.Cut(target, "*")
 
 		wildcards = append(wildcards, WildcardExport{
 			Pattern: pattern,
@@ -358,11 +357,21 @@ func (pkg *PackageJSON) HasTrailingSlashExport(opts *ResolveOptions) bool {
 
 // resolveExportValueWithOpts resolves an export value with custom conditions.
 func resolveExportValueWithOpts(value any, opts *ResolveOptions) (string, error) {
+	if value == nil {
+		return "", ErrNotExported
+	}
 	switch v := value.(type) {
 	case string:
 		return trimDotSlash(v), nil
 	case map[string]any:
 		return resolveConditionsWithOpts(v, opts)
+	case []any:
+		for _, item := range v {
+			if result, err := resolveExportValueWithOpts(item, opts); err == nil {
+				return result, nil
+			}
+		}
+		return "", ErrNotExported
 	}
 	return "", ErrNotExported
 }
@@ -377,12 +386,20 @@ func resolveConditionsWithOpts(conditions map[string]any, opts *ResolveOptions) 
 
 	for _, cond := range conditionList {
 		if value, ok := conditions[cond]; ok {
-			if valueMap, ok := value.(map[string]any); ok {
-				if result, err := resolveConditionsWithOpts(valueMap, opts); err == nil {
+			if value == nil {
+				return "", ErrNotExported
+			}
+			switch v := value.(type) {
+			case map[string]any:
+				if result, err := resolveConditionsWithOpts(v, opts); err == nil {
 					return result, nil
 				}
-			} else if valueStr, ok := value.(string); ok {
-				return trimDotSlash(valueStr), nil
+			case string:
+				return trimDotSlash(v), nil
+			case []any:
+				if result, err := resolveExportValueWithOpts(v, opts); err == nil {
+					return result, nil
+				}
 			}
 		}
 	}
@@ -399,14 +416,10 @@ func trimDotSlash(path string) string {
 // Pattern examples: "./*", "./*.js", "./lib/*"
 // Returns (matched, captured) where captured is the portion matching *.
 func matchExportPattern(pattern, subpath string) (bool, string) {
-	// Find the position of * in pattern
-	starIdx := strings.Index(pattern, "*")
-	if starIdx == -1 {
+	prefix, suffix, found := strings.Cut(pattern, "*")
+	if !found {
 		return false, ""
 	}
-
-	prefix := pattern[:starIdx]
-	suffix := pattern[starIdx+1:]
 
 	// Check if subpath matches the prefix and suffix
 	if !strings.HasPrefix(subpath, prefix) {
