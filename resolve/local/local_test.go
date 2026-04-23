@@ -310,6 +310,43 @@ func TestResolverAutoDiscoverWorkspaces(t *testing.T) {
 	}
 }
 
+func TestResolverWithExclude(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/with-exclude", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	resolver := local.New(mfs, nil).WithExclude([]string{"lodash"})
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(result.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", result.Imports, expected.Imports)
+	}
+
+	// Verify lodash is excluded
+	if _, ok := result.Imports["lodash"]; ok {
+		t.Error("Expected lodash to be excluded from imports")
+	}
+
+	// Verify other deps are still present
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Expected lit import, got %v", result.Imports["lit"])
+	}
+	if result.Imports["@example/utils"] != "/node_modules/@example/utils/index.js" {
+		t.Errorf("Expected @example/utils import, got %v", result.Imports["@example/utils"])
+	}
+}
+
 func TestResolverExplicitWorkspacesOverrideAutoDiscovery(t *testing.T) {
 	// Use the existing workspace fixture
 	mfs := testutil.NewFixtureFS(t, "workspace", "/test")

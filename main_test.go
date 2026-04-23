@@ -126,6 +126,38 @@ func TestGenerateLocal(t *testing.T) {
 	}
 }
 
+func TestGenerateExclude(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "resolve", "with-exclude")
+
+	stdout, stderr, code := runCLI(t, "generate", "--package", fixtureDir, "--exclude", "lodash")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Failed to parse JSON output: %v\nstdout: %s", err, stdout)
+	}
+
+	imports, ok := result["imports"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected imports object, got %T", result["imports"])
+	}
+
+	// lodash should be excluded
+	if imports["lodash"] != nil {
+		t.Error("Expected lodash to be excluded from imports")
+	}
+
+	// Other deps should still be present
+	if imports["lit"] == nil {
+		t.Error("Expected lit import to be present")
+	}
+	if imports["@example/utils"] == nil {
+		t.Error("Expected @example/utils import to be present")
+	}
+}
+
 func TestGenerateHTMLFormat(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "resolve", "simple-pkg")
 
@@ -599,6 +631,7 @@ func TestGenerateHelp(t *testing.T) {
 		"--template",
 		"--format",
 		"--include-package",
+		"--exclude",
 	}
 
 	for _, s := range expectedStrings {

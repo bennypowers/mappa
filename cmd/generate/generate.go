@@ -48,6 +48,9 @@ By default, generates local /node_modules paths. Use --template for custom paths
   # Include additional packages (e.g., devDependencies)
   mappa generate --include-package fuse.js
 
+  # Exclude packages from the generated map
+  mappa generate --exclude lodash --exclude underscore
+
   # Merge with an existing import map (input map takes precedence)
   mappa generate --input-map manual-imports.json
 
@@ -60,6 +63,7 @@ func init() {
 	Cmd.Flags().StringP("format", "f", "json", "Output format (json, html)")
 	Cmd.Flags().String("input-map", "", "Import map file to merge with generated output")
 	Cmd.Flags().StringArray("include-package", nil, "Additional packages to include (can be repeated)")
+	Cmd.Flags().StringArray("exclude", nil, "Exclude packages from the generated map (can be repeated)")
 	Cmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify+dedup (default)")
@@ -68,6 +72,7 @@ func init() {
 	_ = viper.BindPFlag("format", Cmd.Flags().Lookup("format"))
 	_ = viper.BindPFlag("input-map", Cmd.Flags().Lookup("input-map"))
 	_ = viper.BindPFlag("include-package", Cmd.Flags().Lookup("include-package"))
+	_ = viper.BindPFlag("exclude", Cmd.Flags().Lookup("exclude"))
 	_ = viper.BindPFlag("template", Cmd.Flags().Lookup("template"))
 	_ = viper.BindPFlag("conditions", Cmd.Flags().Lookup("conditions"))
 	_ = viper.BindPFlag("optimize", Cmd.Flags().Lookup("optimize"))
@@ -87,8 +92,9 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid format %q: must be 'json' or 'html'", format)
 	}
 
-	// Get additional packages
+	// Get additional packages and exclusions
 	includePackages := viper.GetStringSlice("include-package")
+	excludePackages := viper.GetStringSlice("exclude")
 
 	// Parse input map if provided
 	var inputMap *importmap.ImportMap
@@ -113,6 +119,9 @@ func run(cmd *cobra.Command, args []string) error {
 	resolver := local.New(osfs, nil)
 	if len(includePackages) > 0 {
 		resolver = resolver.WithPackages(includePackages)
+	}
+	if len(excludePackages) > 0 {
+		resolver = resolver.WithExclude(excludePackages)
 	}
 	resolver, err = resolver.WithTemplate(templateArg)
 	if err != nil {

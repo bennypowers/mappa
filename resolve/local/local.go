@@ -34,6 +34,7 @@ type Resolver struct {
 	fs                 fs.FileSystem
 	logger             resolve.Logger
 	additionalPackages []string
+	excludePackages    []string
 	template           *resolve.Template
 	inputMap           *importmap.ImportMap
 	workspacePackages  []resolve.WorkspacePackage
@@ -60,6 +61,24 @@ func (r *Resolver) WithPackages(packages []string) *Resolver {
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: packages,
+		excludePackages:    r.excludePackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
+		conditions:         r.conditions,
+	}
+}
+
+// WithExclude returns a new Resolver that excludes the specified packages
+// from the generated import map.
+func (r *Resolver) WithExclude(packages []string) *Resolver {
+	return &Resolver{
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		excludePackages:    packages,
 		template:           r.template,
 		inputMap:           r.inputMap,
 		workspacePackages:  r.workspacePackages,
@@ -79,6 +98,7 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
 		template:           tmpl,
 		inputMap:           r.inputMap,
 		workspacePackages:  r.workspacePackages,
@@ -95,6 +115,7 @@ func (r *Resolver) WithInputMap(im *importmap.ImportMap) *Resolver {
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
 		template:           r.template,
 		inputMap:           im,
 		workspacePackages:  r.workspacePackages,
@@ -112,6 +133,7 @@ func (r *Resolver) WithWorkspacePackages(packages []resolve.WorkspacePackage) *R
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
 		template:           r.template,
 		inputMap:           r.inputMap,
 		workspacePackages:  packages,
@@ -129,6 +151,7 @@ func (r *Resolver) WithIncludeRootExports() *Resolver {
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
 		template:           r.template,
 		inputMap:           r.inputMap,
 		workspacePackages:  r.workspacePackages,
@@ -147,6 +170,7 @@ func (r *Resolver) WithPackageCache(cache packagejson.Cache) *Resolver {
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
 		template:           r.template,
 		inputMap:           r.inputMap,
 		workspacePackages:  r.workspacePackages,
@@ -164,6 +188,7 @@ func (r *Resolver) WithConditions(conditions []string) *Resolver {
 		fs:                 r.fs,
 		logger:             r.logger,
 		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
 		template:           r.template,
 		inputMap:           r.inputMap,
 		workspacePackages:  r.workspacePackages,
@@ -381,6 +406,11 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 		packagesToProcess[pkgName] = true
 	}
 
+	// Remove excluded packages
+	for _, pkg := range r.excludePackages {
+		delete(packagesToProcess, pkg)
+	}
+
 	// Add direct dependencies to imports (parallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -480,6 +510,11 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		if !workspaceNames[pkgName] {
 			allDeps[pkgName] = true
 		}
+	}
+
+	// Remove excluded packages
+	for _, pkg := range r.excludePackages {
+		delete(allDeps, pkg)
 	}
 
 	// 3. Add node_modules dependencies (parallel)
@@ -616,7 +651,15 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 		sem     = make(chan struct{}, 10) // limit to 10 concurrent goroutines
 	)
 
+	excluded := make(map[string]bool, len(r.excludePackages))
+	for _, pkg := range r.excludePackages {
+		excluded[pkg] = true
+	}
+
 	for depName := range rootPkg.Dependencies {
+		if excluded[depName] {
+			continue
+		}
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
