@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"bennypowers.dev/mappa/cmd/diff"
 	"bennypowers.dev/mappa/cmd/generate"
 	"bennypowers.dev/mappa/cmd/inject"
 	"bennypowers.dev/mappa/cmd/trace"
@@ -79,6 +80,7 @@ func init() {
 	_ = viper.BindPFlag("output", rootCmd.PersistentFlags().Lookup("output"))
 
 	// Add commands (alphabetized)
+	rootCmd.AddCommand(diff.Cmd)
 	rootCmd.AddCommand(generate.Cmd)
 	rootCmd.AddCommand(inject.Cmd)
 	rootCmd.AddCommand(trace.Cmd)

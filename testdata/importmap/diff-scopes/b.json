@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js"
+  },
+  "scopes": {
+    "/node_modules/lit/": {
+      "@lit/reactive-element": "/node_modules/@lit/reactive-element/v2/index.js",
+      "lit-html": "/node_modules/lit-html/index.js"
+    },
+    "/new-scope/": {
+      "bar": "/new-scope/bar.js"
+    }
+  }
+}

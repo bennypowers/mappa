@@ -1,0 +1,23 @@
+{
+  "imports": {
+    "added": {},
+    "removed": {},
+    "modified": {}
+  },
+  "scopes": {
+    "/node_modules/lit/": {
+      "added": {
+        "lit-html": "/node_modules/lit-html/index.js"
+      },
+      "removed": {},
+      "modified": {
+        "@lit/reactive-element": [
+          "/node_modules/@lit/reactive-element/v1/index.js",
+          "/node_modules/@lit/reactive-element/v2/index.js"
+        ]
+      }
+    }
+  },
+  "added_scopes": ["/new-scope/"],
+  "removed_scopes": ["/old-scope/"]
+}
