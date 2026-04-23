@@ -1,0 +1,7 @@
+{
+  "name": "my-app",
+  "dependencies": {
+    "plugin-pkg": "^1.0.0",
+    "framework": "^2.0.0"
+  }
+}

@@ -19,6 +19,7 @@ package importmap_test
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"bennypowers.dev/mappa/importmap"
@@ -66,6 +67,27 @@ func TestParse(t *testing.T) {
 
 			if !reflect.DeepEqual(inputMap, outputMap) {
 				t.Errorf("Round-trip failed:\n  input:  %s\n  output: %s", string(input), string(output))
+			}
+		})
+	}
+}
+
+func TestParseMalformedJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"invalid json", "{bad}"},
+		{"truncated", `{"imports": {`},
+		{"wrong type", `"just a string"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := importmap.Parse([]byte(tt.input))
+			if err == nil {
+				t.Error("Expected error for malformed JSON")
 			}
 		})
 	}
@@ -170,6 +192,8 @@ func TestSimplify(t *testing.T) {
 		{"basic trailing-slash removal", "simplify-basic"},
 		{"with scopes", "simplify-with-scopes"},
 		{"no trailing-slash keys", "simplify-no-trailing-slash"},
+		{"keeps bare specifier alongside trailing slash", "simplify-keeps-bare-specifier"},
+		{"deduplicates scopes matching top-level imports", "simplify-dedup-scopes"},
 	}
 
 	for _, tt := range tests {
@@ -206,5 +230,221 @@ func TestSimplify(t *testing.T) {
 				t.Errorf("Scopes mismatch:\n  got:      %v\n  expected: %v", result.Scopes, expected.Scopes)
 			}
 		})
+	}
+}
+
+func TestValidate(t *testing.T) {
+	t.Run("valid import map", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "importmap/validate-valid", "/test")
+		input, err := mfs.ReadFile("/test/input.json")
+		if err != nil {
+			t.Fatalf("Failed to read input.json: %v", err)
+		}
+		im, err := importmap.Parse(input)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		errs := im.Validate()
+		if len(errs) != 0 {
+			t.Errorf("Expected no validation errors, got %d: %v", len(errs), errs)
+		}
+	})
+
+	t.Run("trailing-slash key without trailing-slash value", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "importmap/validate-trailing-slash", "/test")
+		input, err := mfs.ReadFile("/test/input.json")
+		if err != nil {
+			t.Fatalf("Failed to read input.json: %v", err)
+		}
+		im, err := importmap.Parse(input)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		errs := im.Validate()
+		if len(errs) == 0 {
+			t.Fatal("Expected validation errors for trailing-slash mismatch")
+		}
+		foundTrailing := false
+		foundInvalidValue := false
+		for _, e := range errs {
+			if e.Key == "lit/" {
+				foundTrailing = true
+			}
+			if e.Key == "broken/" {
+				foundInvalidValue = true
+			}
+		}
+		if !foundTrailing {
+			t.Error("Expected error for lit/ key with non-trailing-slash value")
+		}
+		if !foundInvalidValue {
+			t.Error("Expected error for broken/ key with bare value")
+		}
+	})
+
+	t.Run("invalid URL values", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "importmap/validate-invalid-values", "/test")
+		input, err := mfs.ReadFile("/test/input.json")
+		if err != nil {
+			t.Fatalf("Failed to read input.json: %v", err)
+		}
+		im, err := importmap.Parse(input)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		errs := im.Validate()
+		if len(errs) != 2 {
+			t.Fatalf("Expected 2 validation errors, got %d: %v", len(errs), errs)
+		}
+	})
+
+	t.Run("nil import map", func(t *testing.T) {
+		var im *importmap.ImportMap
+		errs := im.Validate()
+		if len(errs) != 0 {
+			t.Errorf("Expected no errors for nil import map, got %v", errs)
+		}
+	})
+
+	t.Run("scope entry validation", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "importmap/validate-scope-entries", "/test")
+		input, err := mfs.ReadFile("/test/input.json")
+		if err != nil {
+			t.Fatalf("Failed to read input.json: %v", err)
+		}
+		im, err := importmap.Parse(input)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
+		}
+		errs := im.Validate()
+		if len(errs) == 0 {
+			t.Fatal("Expected validation error for scope trailing-slash mismatch")
+		}
+		foundScopeError := false
+		for _, e := range errs {
+			if e.Scope == "/node_modules/lit/" {
+				foundScopeError = true
+				break
+			}
+		}
+		if !foundScopeError {
+			t.Error("Expected error within /node_modules/lit/ scope")
+		}
+	})
+}
+
+func TestValidationErrorString(t *testing.T) {
+	t.Run("top-level error", func(t *testing.T) {
+		e := &importmap.ValidationError{Key: "lit/", Value: "/bad", Message: "test msg"}
+		s := e.Error()
+		if s != `key "lit/": test msg` {
+			t.Errorf("Unexpected error string: %s", s)
+		}
+	})
+
+	t.Run("scope entry error", func(t *testing.T) {
+		e := &importmap.ValidationError{Key: "lit/", Value: "/bad", Scope: "/scope/", Message: "test msg"}
+		s := e.Error()
+		if s != `scope "/scope/" key "lit/": test msg` {
+			t.Errorf("Unexpected error string: %s", s)
+		}
+	})
+
+	t.Run("scope prefix error", func(t *testing.T) {
+		e := &importmap.ValidationError{Scope: "bad-scope", Message: "invalid scope"}
+		s := e.Error()
+		if s != `scope "bad-scope": invalid scope` {
+			t.Errorf("Unexpected error string: %s", s)
+		}
+	})
+}
+
+func TestSimplifyNil(t *testing.T) {
+	var im *importmap.ImportMap
+	result := im.Simplify()
+	if result != nil {
+		t.Errorf("Simplify on nil should return nil, got %v", result)
+	}
+}
+
+func TestCloneNil(t *testing.T) {
+	var im *importmap.ImportMap
+	result := im.Clone()
+	if result != nil {
+		t.Errorf("Clone on nil should return nil, got %v", result)
+	}
+}
+
+func TestMergeNils(t *testing.T) {
+	t.Run("both nil", func(t *testing.T) {
+		var a, b *importmap.ImportMap
+		result := a.Merge(b)
+		if result == nil {
+			t.Fatal("Merge(nil, nil) should return empty map, not nil")
+		}
+	})
+
+	t.Run("base nil", func(t *testing.T) {
+		var a *importmap.ImportMap
+		b := &importmap.ImportMap{Imports: map[string]string{"lit": "/lit.js"}}
+		result := a.Merge(b)
+		if result.Imports["lit"] != "/lit.js" {
+			t.Errorf("Expected lit import, got %v", result.Imports)
+		}
+	})
+
+	t.Run("other nil", func(t *testing.T) {
+		a := &importmap.ImportMap{Imports: map[string]string{"lit": "/lit.js"}}
+		result := a.Merge(nil)
+		if result.Imports["lit"] != "/lit.js" {
+			t.Errorf("Expected lit import, got %v", result.Imports)
+		}
+	})
+}
+
+func TestToHTML(t *testing.T) {
+	im := &importmap.ImportMap{
+		Imports: map[string]string{"lit": "/node_modules/lit/index.js"},
+	}
+	html := im.ToHTML()
+	prefix := `<script type="importmap">`
+	if !strings.HasPrefix(html, prefix) {
+		t.Errorf("ToHTML should start with script tag, got: %s", html)
+	}
+}
+
+func TestFormat(t *testing.T) {
+	im := &importmap.ImportMap{}
+	if im.Format("json") != "{}" {
+		t.Errorf("Format json for empty map should return {}, got %s", im.Format("json"))
+	}
+	if im.Format("html") == "{}" {
+		t.Error("Format html should not return bare JSON")
+	}
+}
+
+func TestSimplifyEntries(t *testing.T) {
+	entries := map[string]string{
+		"lit":               "/node_modules/lit/index.js",
+		"lit/":              "/node_modules/lit/",
+		"lit/decorators.js": "/node_modules/lit/decorators.js",
+		"lit/html.js":       "/node_modules/lit/html.js",
+		"other":             "/node_modules/other/index.js",
+	}
+	result := importmap.SimplifyEntries(entries)
+	if _, ok := result["lit/decorators.js"]; ok {
+		t.Error("lit/decorators.js should be simplified away")
+	}
+	if _, ok := result["lit/html.js"]; ok {
+		t.Error("lit/html.js should be simplified away")
+	}
+	if result["lit"] != "/node_modules/lit/index.js" {
+		t.Error("bare specifier 'lit' should be kept")
+	}
+	if result["lit/"] != "/node_modules/lit/" {
+		t.Error("trailing-slash key 'lit/' should be kept")
+	}
+	if result["other"] != "/node_modules/other/index.js" {
+		t.Error("unrelated key 'other' should be kept")
 	}
 }

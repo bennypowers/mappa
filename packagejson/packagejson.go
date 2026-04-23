@@ -63,6 +63,10 @@ type PackageJSON struct {
 	Dependencies map[string]string `json:"dependencies,omitempty"`
 	// DevDependencies maps dev package names to version specifiers.
 	DevDependencies map[string]string `json:"devDependencies,omitempty"`
+	// PeerDependencies maps peer package names to version specifiers.
+	PeerDependencies map[string]string `json:"peerDependencies,omitempty"`
+	// OptionalDependencies maps optional package names to version specifiers.
+	OptionalDependencies map[string]string `json:"optionalDependencies,omitempty"`
 	// RawWorkspaces holds the raw JSON for the workspaces field.
 	// Use WorkspacePatterns() to extract the patterns.
 	RawWorkspaces json.RawMessage `json:"workspaces,omitempty"`
@@ -103,8 +107,9 @@ type ExportEntry struct {
 
 // WildcardExport represents a wildcard export pattern.
 type WildcardExport struct {
-	Pattern string // The pattern (e.g., "./*")
-	Target  string // The target prefix (e.g., "dist/")
+	Pattern      string // The pattern (e.g., "./*")
+	Target       string // The target prefix (e.g., "dist/")
+	TargetSuffix string // The target suffix after * (e.g., ".js"), empty for pure folder wildcards
 }
 
 // Parse parses package.json data.
@@ -123,6 +128,116 @@ func ParseFile(fs fs.FileSystem, path string) (*PackageJSON, error) {
 		return nil, err
 	}
 	return Parse(data)
+}
+
+// ImportMapEntry represents a single key-path pair for building import maps.
+type ImportMapEntry struct {
+	Key  string // Import key relative to package name (e.g., "", "/", "/utils")
+	Path string // Target path relative to package root (e.g., "index.js", "dist/")
+}
+
+// ImportMapEntries returns all entries needed for an import map: explicit
+// exports, wildcard trailing-slash keys, and a plain trailing-slash fallback
+// for packages with no exports. The caller maps each entry's Path to a URL.
+//
+// Key conventions:
+//   - "" means the bare package specifier (e.g., "lit")
+//   - "/" means a trailing-slash key (e.g., "lit/")
+//   - "/sub" means a subpath key (e.g., "lit/sub")
+func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry {
+	var result []ImportMapEntry
+
+	entries := pkg.ExportEntries(opts)
+	for _, entry := range entries {
+		var key string
+		if entry.Subpath == "." {
+			key = ""
+		} else {
+			key = "/" + trimDotSlash(entry.Subpath)
+		}
+		result = append(result, ImportMapEntry{Key: key, Path: entry.Target})
+	}
+
+	wildcards := pkg.WildcardExports(opts)
+	for _, w := range wildcards {
+		// Only emit folder mappings for pure wildcards (no suffix transform).
+		// Patterns like "./*.js" -> "./src/*.mjs" can't be expressed as
+		// trailing-slash keys since the extension transform would be lost.
+		_, patternSuffix, _ := strings.Cut(w.Pattern, "*")
+		if patternSuffix != "" || w.TargetSuffix != "" {
+			continue
+		}
+		patternPrefix := strings.TrimSuffix(trimDotSlash(w.Pattern), "*")
+		result = append(result, ImportMapEntry{
+			Key:  "/" + patternPrefix,
+			Path: w.Target,
+		})
+	}
+
+	if len(entries) == 0 && pkg.Main != "" && pkg.Exports == nil {
+		result = append(result, ImportMapEntry{
+			Key:  "",
+			Path: trimDotSlash(pkg.Main),
+		})
+	}
+
+	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
+		result = append(result, ImportMapEntry{Key: "/", Path: ""})
+	}
+
+	return result
+}
+
+// ErrNotImported is returned when a subpath import is not defined in the package.
+var ErrNotImported = errors.New("not defined in package.json imports")
+
+// ResolveImport resolves a subpath import (e.g., "#internal") to its target.
+// Subpath imports are defined in the "imports" field of package.json and allow
+// packages to create internal aliases starting with #.
+// Pass nil for opts to use DefaultConditions.
+func (pkg *PackageJSON) ResolveImport(specifier string, opts *ResolveOptions) (string, error) {
+	if pkg.Imports == nil {
+		return "", ErrNotImported
+	}
+
+	importsMap, ok := pkg.Imports.(map[string]any)
+	if !ok {
+		return "", ErrNotImported
+	}
+
+	// Direct match
+	if value, ok := importsMap[specifier]; ok {
+		return resolveExportValueWithOpts(value, opts)
+	}
+
+	// Try wildcard pattern matching
+	var patterns []string
+	for pattern := range importsMap {
+		if strings.Contains(pattern, "*") {
+			patterns = append(patterns, pattern)
+		}
+	}
+	sort.Slice(patterns, func(i, j int) bool {
+		return len(patterns[i]) > len(patterns[j])
+	})
+
+	for _, pattern := range patterns {
+		value := importsMap[pattern]
+		matched, captured := matchExportPattern(pattern, specifier)
+		if !matched {
+			continue
+		}
+		target, err := resolveExportValueWithOpts(value, opts)
+		if err != nil {
+			return "", err
+		}
+		if strings.Contains(target, "*") {
+			return strings.Replace(target, "*", captured, 1), nil
+		}
+		return target, nil
+	}
+
+	return "", ErrNotImported
 }
 
 // ResolveExport resolves a subpath export to its target file path.
@@ -199,10 +314,10 @@ func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (str
 			continue
 		}
 
-		// Resolve the target value
+		// Resolve the target value; null targets block the subpath
 		target, err := resolveExportValueWithOpts(value, opts)
 		if err != nil {
-			continue
+			return "", err
 		}
 
 		// Replace * in target with captured portion
@@ -308,14 +423,14 @@ func (pkg *PackageJSON) WildcardExports(opts *ResolveOptions) []WildcardExport {
 			continue
 		}
 
-		// Extract the prefix before the wildcard
+		// Extract the prefix and suffix around the wildcard
 		target := trimDotSlash(targetStr)
-		wildcardIdx := strings.Index(target, "*")
-		targetPrefix := target[:wildcardIdx]
+		targetPrefix, targetSuffix, _ := strings.Cut(target, "*")
 
 		wildcards = append(wildcards, WildcardExport{
-			Pattern: pattern,
-			Target:  targetPrefix,
+			Pattern:      pattern,
+			Target:       targetPrefix,
+			TargetSuffix: targetSuffix,
 		})
 	}
 
@@ -358,11 +473,21 @@ func (pkg *PackageJSON) HasTrailingSlashExport(opts *ResolveOptions) bool {
 
 // resolveExportValueWithOpts resolves an export value with custom conditions.
 func resolveExportValueWithOpts(value any, opts *ResolveOptions) (string, error) {
+	if value == nil {
+		return "", ErrNotExported
+	}
 	switch v := value.(type) {
 	case string:
 		return trimDotSlash(v), nil
 	case map[string]any:
 		return resolveConditionsWithOpts(v, opts)
+	case []any:
+		for _, item := range v {
+			if result, err := resolveExportValueWithOpts(item, opts); err == nil {
+				return result, nil
+			}
+		}
+		return "", ErrNotExported
 	}
 	return "", ErrNotExported
 }
@@ -377,12 +502,20 @@ func resolveConditionsWithOpts(conditions map[string]any, opts *ResolveOptions) 
 
 	for _, cond := range conditionList {
 		if value, ok := conditions[cond]; ok {
-			if valueMap, ok := value.(map[string]any); ok {
-				if result, err := resolveConditionsWithOpts(valueMap, opts); err == nil {
+			if value == nil {
+				return "", ErrNotExported
+			}
+			switch v := value.(type) {
+			case map[string]any:
+				if result, err := resolveConditionsWithOpts(v, opts); err == nil {
 					return result, nil
 				}
-			} else if valueStr, ok := value.(string); ok {
-				return trimDotSlash(valueStr), nil
+			case string:
+				return trimDotSlash(v), nil
+			case []any:
+				if result, err := resolveExportValueWithOpts(v, opts); err == nil {
+					return result, nil
+				}
 			}
 		}
 	}
@@ -399,14 +532,10 @@ func trimDotSlash(path string) string {
 // Pattern examples: "./*", "./*.js", "./lib/*"
 // Returns (matched, captured) where captured is the portion matching *.
 func matchExportPattern(pattern, subpath string) (bool, string) {
-	// Find the position of * in pattern
-	starIdx := strings.Index(pattern, "*")
-	if starIdx == -1 {
+	prefix, suffix, found := strings.Cut(pattern, "*")
+	if !found {
 		return false, ""
 	}
-
-	prefix := pattern[:starIdx]
-	suffix := pattern[starIdx+1:]
 
 	// Check if subpath matches the prefix and suffix
 	if !strings.HasPrefix(subpath, prefix) {

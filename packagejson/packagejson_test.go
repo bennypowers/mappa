@@ -464,6 +464,153 @@ func TestWorkspacePatterns(t *testing.T) {
 	}
 }
 
+func TestResolveExportNullTarget(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/null-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Exports map[string]string `json:"exports"`
+		Blocked []string          `json:"blocked"`
+		Allowed []string          `json:"allowed"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for subpath, want := range expected.Exports {
+		t.Run("resolves "+subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, nil)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+
+	for _, blocked := range expected.Blocked {
+		t.Run("blocks "+blocked, func(t *testing.T) {
+			_, err := pkg.ResolveExport(blocked, nil)
+			if err != packagejson.ErrNotExported {
+				t.Errorf("ResolveExport(%q) should return ErrNotExported, got %v", blocked, err)
+			}
+		})
+	}
+
+	entries := pkg.ExportEntries(nil)
+	entrySubpaths := make(map[string]bool)
+	for _, e := range entries {
+		entrySubpaths[e.Subpath] = true
+		for _, blocked := range expected.Blocked {
+			if e.Subpath == blocked {
+				t.Errorf("ExportEntries should not include blocked subpath %q", blocked)
+			}
+		}
+	}
+	for _, allowed := range expected.Allowed {
+		if !entrySubpaths[allowed] {
+			t.Errorf("ExportEntries should include allowed subpath %q", allowed)
+		}
+	}
+}
+
+func TestResolveExportArrayFallback(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/array-fallback-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Exports     map[string]string `json:"exports"`
+		DefaultOnly map[string]string `json:"default_only"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for subpath, want := range expected.Exports {
+		t.Run("default conditions "+subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, nil)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+
+	defaultOpts := &packagejson.ResolveOptions{Conditions: []string{"default"}}
+	for subpath, want := range expected.DefaultOnly {
+		t.Run("default-only conditions "+subpath, func(t *testing.T) {
+			resolved, err := pkg.ResolveExport(subpath, defaultOpts)
+			if err != nil {
+				t.Fatalf("ResolveExport(%q) with default-only failed: %v", subpath, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveExport(%q) = %q, want %q", subpath, resolved, want)
+			}
+		})
+	}
+}
+
+func TestResolveExportNullCondition(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/mixed-null-and-valid", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		WithBrowser    string `json:"with_browser"`
+		WithoutBrowser string `json:"without_browser"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	t.Run("browser condition hits null", func(t *testing.T) {
+		_, err := pkg.ResolveExport(".", nil)
+		if err != packagejson.ErrNotExported {
+			t.Errorf("Expected ErrNotExported when browser condition is null, got %v", err)
+		}
+	})
+
+	t.Run("import condition skips null browser", func(t *testing.T) {
+		opts := &packagejson.ResolveOptions{Conditions: []string{"import", "default"}}
+		resolved, err := pkg.ResolveExport(".", opts)
+		if err != nil {
+			t.Fatalf("ResolveExport failed: %v", err)
+		}
+		if resolved != expected.WithoutBrowser {
+			t.Errorf("ResolveExport = %q, want %q", resolved, expected.WithoutBrowser)
+		}
+	})
+}
+
 func TestHasWorkspaces(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -503,5 +650,120 @@ func TestHasWorkspaces(t *testing.T) {
 				t.Errorf("HasWorkspaces() = %v, want %v", pkg.HasWorkspaces(), tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolveImport(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/subpath-imports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Resolutions map[string]string `json:"resolutions"`
+		Blocked     []string          `json:"blocked"`
+		NotFound    []string          `json:"not_found"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for specifier, want := range expected.Resolutions {
+		t.Run("resolves "+specifier, func(t *testing.T) {
+			resolved, err := pkg.ResolveImport(specifier, nil)
+			if err != nil {
+				t.Fatalf("ResolveImport(%q) failed: %v", specifier, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveImport(%q) = %q, want %q", specifier, resolved, want)
+			}
+		})
+	}
+
+	for _, blocked := range expected.Blocked {
+		t.Run("blocks "+blocked, func(t *testing.T) {
+			_, err := pkg.ResolveImport(blocked, nil)
+			if err == nil {
+				t.Errorf("ResolveImport(%q) should fail for null import", blocked)
+			}
+		})
+	}
+
+	for _, nf := range expected.NotFound {
+		t.Run("not found "+nf, func(t *testing.T) {
+			_, err := pkg.ResolveImport(nf, nil)
+			if err != packagejson.ErrNotImported {
+				t.Errorf("ResolveImport(%q) should return ErrNotImported, got %v", nf, err)
+			}
+		})
+	}
+}
+
+func TestResolveImportNoImportsField(t *testing.T) {
+	pkg := &packagejson.PackageJSON{Name: "test"}
+	_, err := pkg.ResolveImport("#anything", nil)
+	if err != packagejson.ErrNotImported {
+		t.Errorf("Expected ErrNotImported for package without imports field, got %v", err)
+	}
+}
+
+func TestParseMalformedJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty string", ""},
+		{"invalid json", "{invalid}"},
+		{"truncated json", `{"name": "test`},
+		{"array instead of object", `["not", "an", "object"]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := packagejson.Parse([]byte(tt.input))
+			if err == nil {
+				t.Error("Expected error for malformed JSON")
+			}
+		})
+	}
+}
+
+func TestPeerAndOptionalDependencies(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/peer-optional-deps", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Peer     map[string]string `json:"peer"`
+		Optional map[string]string `json:"optional"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for name, version := range expected.Peer {
+		if pkg.PeerDependencies[name] != version {
+			t.Errorf("PeerDependencies[%q] = %q, want %q", name, pkg.PeerDependencies[name], version)
+		}
+	}
+	for name, version := range expected.Optional {
+		if pkg.OptionalDependencies[name] != version {
+			t.Errorf("OptionalDependencies[%q] = %q, want %q", name, pkg.OptionalDependencies[name], version)
+		}
 	}
 }

@@ -20,9 +20,94 @@ package importmap
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
+	"net/url"
 	"strings"
 )
+
+// ValidationError describes a spec violation in an import map.
+type ValidationError struct {
+	Key     string
+	Value   string
+	Scope   string // empty for top-level imports
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	if e.Scope != "" && e.Key != "" {
+		return fmt.Sprintf("scope %q key %q: %s", e.Scope, e.Key, e.Message)
+	}
+	if e.Scope != "" {
+		return fmt.Sprintf("scope %q: %s", e.Scope, e.Message)
+	}
+	return fmt.Sprintf("key %q: %s", e.Key, e.Message)
+}
+
+// Validate checks the import map for WHATWG spec violations.
+// Returns a slice of validation errors (empty if valid).
+func (im *ImportMap) Validate() []*ValidationError {
+	if im == nil {
+		return nil
+	}
+
+	var errs []*ValidationError
+	errs = append(errs, validateSpecifierMap(im.Imports, "")...)
+	for scope, imports := range im.Scopes {
+		if !isValidSpecifierValue(scope) {
+			errs = append(errs, &ValidationError{
+				Scope:   scope,
+				Message: "scope key must be a valid URL or start with /, ./, or ../",
+			})
+		}
+		errs = append(errs, validateSpecifierMap(imports, scope)...)
+	}
+	return errs
+}
+
+func validateSpecifierMap(imports map[string]string, scope string) []*ValidationError {
+	var errs []*ValidationError
+	for key, value := range imports {
+		keySlash := strings.HasSuffix(key, "/")
+		valueSlash := strings.HasSuffix(value, "/")
+		if keySlash && !valueSlash {
+			errs = append(errs, &ValidationError{
+				Key:     key,
+				Value:   value,
+				Scope:   scope,
+				Message: "trailing-slash key must map to a value ending with /",
+			})
+		}
+		if !isValidSpecifierValue(value) {
+			errs = append(errs, &ValidationError{
+				Key:     key,
+				Value:   value,
+				Scope:   scope,
+				Message: "value must be a valid URL or start with /, ./, or ../",
+			})
+		}
+	}
+	return errs
+}
+
+func isValidSpecifierValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "/") ||
+		strings.HasPrefix(value, "./") ||
+		strings.HasPrefix(value, "../") {
+		return true
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "" {
+		return false
+	}
+	return u.Opaque != "" || u.Host != "" || strings.HasPrefix(u.Path, "/")
+}
 
 // ImportMap represents an ES module import map.
 type ImportMap struct {
@@ -145,11 +230,37 @@ func (im *ImportMap) Simplify() *ImportMap {
 		result.Imports = simplifyImports(im.Imports)
 	}
 
-	// Simplify each scope, omitting scopes that become empty
+	// Simplify each scope, omitting scopes that become empty or redundant
 	if im.Scopes != nil {
 		result.Scopes = make(map[string]map[string]string, len(im.Scopes))
 		for scope, imports := range im.Scopes {
 			simplified := simplifyImports(imports)
+			if len(simplified) == 0 {
+				continue
+			}
+			// Remove scope entries redundant with top-level imports
+			if result.Imports != nil {
+				deduplicated := make(map[string]string)
+				for key, value := range simplified {
+					if topLevel, ok := result.Imports[key]; ok && topLevel == value {
+						continue
+					}
+					covered := false
+					for tlKey, tlValue := range result.Imports {
+						if !strings.HasSuffix(tlKey, "/") {
+							continue
+						}
+						if rel, ok := strings.CutPrefix(key, tlKey); ok && tlValue+rel == value {
+							covered = true
+							break
+						}
+					}
+					if !covered {
+						deduplicated[key] = value
+					}
+				}
+				simplified = deduplicated
+			}
 			if len(simplified) > 0 {
 				result.Scopes[scope] = simplified
 			}
@@ -176,6 +287,12 @@ func (im *ImportMap) Simplify() *ImportMap {
 	return result
 }
 
+// SimplifyEntries removes entries from a specifier map that are covered by
+// trailing-slash keys. Useful for simplifying scope entries independently.
+func SimplifyEntries(imports map[string]string) map[string]string {
+	return simplifyImports(imports)
+}
+
 // simplifyImports removes entries covered by trailing-slash keys.
 func simplifyImports(imports map[string]string) map[string]string {
 	// First, collect all trailing-slash keys
@@ -193,22 +310,25 @@ func simplifyImports(imports map[string]string) map[string]string {
 		return result
 	}
 
-	// Filter out entries covered by trailing-slash keys
+	// Filter out entries whose target matches the trailing-slash expansion.
+	// An explicit entry like "lit/foo": "/custom/override.js" is kept when
+	// its target differs from what "lit/" would resolve to.
 	result := make(map[string]string)
 	for key, value := range imports {
-		// Keep trailing-slash keys themselves
 		if strings.HasSuffix(key, "/") {
 			result[key] = value
 			continue
 		}
 
-		// Check if this key is covered by any trailing-slash key
 		covered := false
 		for tsKey := range trailingSlashKeys {
-			prefix := strings.TrimSuffix(tsKey, "/")
-			if strings.HasPrefix(key, prefix+"/") {
-				covered = true
-				break
+			if strings.HasPrefix(key, tsKey) {
+				relPath := key[len(tsKey):]
+				baseTarget := imports[tsKey]
+				if baseTarget+relPath == value {
+					covered = true
+					break
+				}
 			}
 		}
 

@@ -1,0 +1,13 @@
+{
+  "name": "imports-pkg",
+  "version": "1.0.0",
+  "imports": {
+    "#internal": "./src/internal.js",
+    "#utils/*": "./src/utils/*.js",
+    "#config": {
+      "browser": "./src/config-browser.js",
+      "default": "./src/config.js"
+    },
+    "#blocked": null
+  }
+}

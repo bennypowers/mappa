@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "pkg-a": "/node_modules/pkg-a/index.js"
+  },
+  "scopes": {
+    "/node_modules/pkg-a/": {
+      "pkg-b": "/node_modules/pkg-b/index.js"
+    },
+    "/node_modules/pkg-b/": {
+      "pkg-a": "/node_modules/pkg-a/index.js"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "scopes": {
+    "/node_modules/lit/": {
+      "@lit/reactive-element/": "/node_modules/@lit/reactive-element"
+    }
+  }
+}

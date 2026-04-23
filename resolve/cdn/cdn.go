@@ -369,37 +369,8 @@ func (r *Resolver) addPackageImports(im *importmap.ImportMap, mu *sync.Mutex, pk
 func (r *Resolver) buildPackageImports(pkgName, version string, pkg *packagejson.PackageJSON) map[string]string {
 	imports := make(map[string]string)
 	opts := r.resolveOpts()
-
-	// Add explicit exports
-	entries := pkg.ExportEntries(opts)
-	for _, entry := range entries {
-		var importKey string
-		if entry.Subpath == "." {
-			importKey = pkgName
-		} else {
-			subpath := strings.TrimPrefix(entry.Subpath, "./")
-			importKey = pkgName + "/" + subpath
-		}
-		imports[importKey] = r.template.Expand(pkgName, version, entry.Target)
+	for _, e := range pkg.ImportMapEntries(opts) {
+		imports[pkgName+e.Key] = r.template.Expand(pkgName, version, e.Path)
 	}
-
-	// Handle wildcard exports
-	wildcards := pkg.WildcardExports(opts)
-	for _, w := range wildcards {
-		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-		importKey := pkgName + "/" + patternPrefix
-		imports[importKey] = r.template.Expand(pkgName, version, w.Target)
-	}
-
-	// Fallback to main if no exports
-	if len(entries) == 0 && pkg.Main != "" {
-		imports[pkgName] = r.template.Expand(pkgName, version, strings.TrimPrefix(pkg.Main, "./"))
-	}
-
-	// Add trailing slash for packages that support it
-	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
-		imports[pkgName+"/"] = r.template.Expand(pkgName, version, "")
-	}
-
 	return imports
 }

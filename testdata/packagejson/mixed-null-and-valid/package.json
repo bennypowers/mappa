@@ -1,0 +1,11 @@
+{
+  "name": "mixed-null-pkg",
+  "version": "1.0.0",
+  "exports": {
+    ".": {
+      "browser": null,
+      "import": "./esm/index.js",
+      "default": "./index.js"
+    }
+  }
+}

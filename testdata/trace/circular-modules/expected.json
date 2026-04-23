@@ -1,0 +1,5 @@
+{
+  "entrypoints": ["a.js"],
+  "modules": ["a.js", "b.js"],
+  "bare_specifiers": []
+}

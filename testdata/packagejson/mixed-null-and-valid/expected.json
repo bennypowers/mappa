@@ -1,0 +1,4 @@
+{
+  "with_browser": "not_exported",
+  "without_browser": "esm/index.js"
+}

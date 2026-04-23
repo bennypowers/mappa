@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "parent-pkg": "/node_modules/parent-pkg/index.js",
+    "shared-dep": "/node_modules/shared-dep/index.js"
+  },
+  "scopes": {
+    "/node_modules/parent-pkg/": {
+      "shared-dep": "/node_modules/parent-pkg/node_modules/shared-dep/v1.js"
+    }
+  }
+}

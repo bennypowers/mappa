@@ -1,0 +1,8 @@
+{
+  "exports": {
+    ".": "index.js",
+    "./public": "public.js"
+  },
+  "blocked": ["./internal"],
+  "allowed": [".", "./public"]
+}
