@@ -1,0 +1,12 @@
+{
+  "imports": {
+    "added": {
+      "@lit/reactive-element": "/node_modules/@lit/reactive-element/index.js"
+    },
+    "removed": {},
+    "modified": {}
+  },
+  "scopes": {},
+  "added_scopes": [],
+  "removed_scopes": []
+}

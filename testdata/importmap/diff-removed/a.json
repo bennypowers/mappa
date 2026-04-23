@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "@lit/reactive-element": "/node_modules/@lit/reactive-element/index.js"
+  }
+}

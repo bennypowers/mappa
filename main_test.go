@@ -575,6 +575,7 @@ func TestHelp(t *testing.T) {
 
 	expectedStrings := []string{
 		"mappa",
+		"diff",
 		"generate",
 		"trace",
 		"--package",
@@ -822,6 +823,122 @@ func TestInjectJSONFormat(t *testing.T) {
 				t.Fatalf("Failed to parse JSON line: %v\nline: %s", err, line)
 			}
 		}
+	}
+}
+
+func TestDiffHelp(t *testing.T) {
+	stdout, _, code := runCLI(t, "diff", "--help")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for help, got %d", code)
+	}
+
+	expectedStrings := []string{
+		"--format",
+		"<file-a>",
+		"<file-b>",
+	}
+
+	for _, s := range expectedStrings {
+		if !strings.Contains(stdout, s) {
+			t.Errorf("Expected %q in diff help output", s)
+		}
+	}
+}
+
+func TestDiffIdentical(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "importmap", "diff-identical")
+	fileA := filepath.Join(fixtureDir, "a.json")
+	fileB := filepath.Join(fixtureDir, "b.json")
+
+	stdout, stderr, code := runCLI(t, "diff", fileA, fileB)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for identical maps, got %d\nstderr: %s", code, stderr)
+	}
+
+	if !strings.Contains(stdout, "identical") {
+		t.Errorf("Expected 'identical' in output, got: %s", stdout)
+	}
+}
+
+func TestDiffDifferent(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "importmap", "diff-added")
+	fileA := filepath.Join(fixtureDir, "a.json")
+	fileB := filepath.Join(fixtureDir, "b.json")
+
+	stdout, _, code := runCLI(t, "diff", fileA, fileB)
+	if code != 1 {
+		t.Fatalf("Expected exit code 1 for different maps, got %d", code)
+	}
+
+	if !strings.Contains(stdout, "@lit/reactive-element") {
+		t.Errorf("Expected added entry in output, got: %s", stdout)
+	}
+}
+
+func TestDiffJSONFormat(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "importmap", "diff-modified")
+	fileA := filepath.Join(fixtureDir, "a.json")
+	fileB := filepath.Join(fixtureDir, "b.json")
+
+	stdout, _, code := runCLI(t, "diff", fileA, fileB, "--format", "json")
+	if code != 1 {
+		t.Fatalf("Expected exit code 1 for different maps, got %d", code)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("Expected valid JSON output, got parse error: %v\nstdout: %s", err, stdout)
+	}
+
+	imports, ok := result["imports"].(map[string]any)
+	if !ok {
+		t.Fatal("Expected 'imports' key in JSON output")
+	}
+
+	modified, ok := imports["modified"].(map[string]any)
+	if !ok {
+		t.Fatal("Expected 'modified' key in imports")
+	}
+
+	if modified["@lit/reactive-element"] == nil {
+		t.Error("Expected '@lit/reactive-element' in modified entries")
+	}
+}
+
+func TestDiffMissingArgs(t *testing.T) {
+	_, stderr, code := runCLI(t, "diff")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for missing arguments")
+	}
+
+	if !strings.Contains(stderr, "2 arg(s)") {
+		t.Errorf("Expected arg count error, got: %s", stderr)
+	}
+}
+
+func TestDiffMissingFile(t *testing.T) {
+	_, stderr, code := runCLI(t, "diff", "nonexistent.json", "also-nonexistent.json")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for missing file")
+	}
+
+	if !strings.Contains(stderr, "failed to read") {
+		t.Errorf("Expected 'failed to read' error, got: %s", stderr)
+	}
+}
+
+func TestDiffInvalidFormat(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "importmap", "diff-identical")
+	fileA := filepath.Join(fixtureDir, "a.json")
+	fileB := filepath.Join(fixtureDir, "b.json")
+
+	_, stderr, code := runCLI(t, "diff", fileA, fileB, "--format", "xml")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for invalid format")
+	}
+
+	if !strings.Contains(stderr, "invalid format") {
+		t.Errorf("Expected 'invalid format' error, got: %s", stderr)
 	}
 }
 
