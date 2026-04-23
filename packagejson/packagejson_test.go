@@ -736,22 +736,34 @@ func TestParseMalformedJSON(t *testing.T) {
 }
 
 func TestPeerAndOptionalDependencies(t *testing.T) {
-	input := `{
-		"name": "test-pkg",
-		"dependencies": {"dep-a": "^1.0.0"},
-		"peerDependencies": {"peer-b": "^2.0.0"},
-		"optionalDependencies": {"opt-c": "^3.0.0"}
-	}`
+	mfs := testutil.NewFixtureFS(t, "packagejson/peer-optional-deps", "/test")
 
-	pkg, err := packagejson.Parse([]byte(input))
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
 	if err != nil {
-		t.Fatalf("Parse failed: %v", err)
+		t.Fatalf("ParseFile failed: %v", err)
 	}
 
-	if pkg.PeerDependencies["peer-b"] != "^2.0.0" {
-		t.Errorf("Expected peer dep peer-b, got %v", pkg.PeerDependencies)
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
 	}
-	if pkg.OptionalDependencies["opt-c"] != "^3.0.0" {
-		t.Errorf("Expected optional dep opt-c, got %v", pkg.OptionalDependencies)
+
+	var expected struct {
+		Peer     map[string]string `json:"peer"`
+		Optional map[string]string `json:"optional"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for name, version := range expected.Peer {
+		if pkg.PeerDependencies[name] != version {
+			t.Errorf("PeerDependencies[%q] = %q, want %q", name, pkg.PeerDependencies[name], version)
+		}
+	}
+	for name, version := range expected.Optional {
+		if pkg.OptionalDependencies[name] != version {
+			t.Errorf("OptionalDependencies[%q] = %q, want %q", name, pkg.OptionalDependencies[name], version)
+		}
 	}
 }

@@ -62,7 +62,7 @@ func init() {
 	Cmd.Flags().StringArray("include-package", nil, "Additional packages to include (can be repeated)")
 	Cmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
-	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify (default), 2=simplify+dedup scopes")
+	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify+dedup (default)")
 
 	_ = viper.BindPFlag("format", Cmd.Flags().Lookup("format"))
 	_ = viper.BindPFlag("input-map", Cmd.Flags().Lookup("input-map"))

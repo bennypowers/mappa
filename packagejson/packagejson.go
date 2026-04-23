@@ -107,8 +107,9 @@ type ExportEntry struct {
 
 // WildcardExport represents a wildcard export pattern.
 type WildcardExport struct {
-	Pattern string // The pattern (e.g., "./*")
-	Target  string // The target prefix (e.g., "dist/")
+	Pattern      string // The pattern (e.g., "./*")
+	Target       string // The target prefix (e.g., "dist/")
+	TargetSuffix string // The target suffix after * (e.g., ".js"), empty for pure folder wildcards
 }
 
 // Parse parses package.json data.
@@ -159,6 +160,13 @@ func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry 
 
 	wildcards := pkg.WildcardExports(opts)
 	for _, w := range wildcards {
+		// Only emit folder mappings for pure wildcards (no suffix transform).
+		// Patterns like "./*.js" -> "./src/*.mjs" can't be expressed as
+		// trailing-slash keys since the extension transform would be lost.
+		_, patternSuffix, _ := strings.Cut(w.Pattern, "*")
+		if patternSuffix != "" || w.TargetSuffix != "" {
+			continue
+		}
 		patternPrefix := strings.TrimSuffix(trimDotSlash(w.Pattern), "*")
 		result = append(result, ImportMapEntry{
 			Key:  "/" + patternPrefix,
@@ -166,7 +174,7 @@ func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry 
 		})
 	}
 
-	if len(entries) == 0 && pkg.Main != "" {
+	if len(entries) == 0 && pkg.Main != "" && pkg.Exports == nil {
 		result = append(result, ImportMapEntry{
 			Key:  "",
 			Path: trimDotSlash(pkg.Main),
@@ -221,7 +229,7 @@ func (pkg *PackageJSON) ResolveImport(specifier string, opts *ResolveOptions) (s
 		}
 		target, err := resolveExportValueWithOpts(value, opts)
 		if err != nil {
-			continue
+			return "", err
 		}
 		if strings.Contains(target, "*") {
 			return strings.Replace(target, "*", captured, 1), nil
@@ -306,10 +314,10 @@ func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (str
 			continue
 		}
 
-		// Resolve the target value
+		// Resolve the target value; null targets block the subpath
 		target, err := resolveExportValueWithOpts(value, opts)
 		if err != nil {
-			continue
+			return "", err
 		}
 
 		// Replace * in target with captured portion
@@ -415,13 +423,14 @@ func (pkg *PackageJSON) WildcardExports(opts *ResolveOptions) []WildcardExport {
 			continue
 		}
 
-		// Extract the prefix before the wildcard
+		// Extract the prefix and suffix around the wildcard
 		target := trimDotSlash(targetStr)
-		targetPrefix, _, _ := strings.Cut(target, "*")
+		targetPrefix, targetSuffix, _ := strings.Cut(target, "*")
 
 		wildcards = append(wildcards, WildcardExport{
-			Pattern: pattern,
-			Target:  targetPrefix,
+			Pattern:      pattern,
+			Target:       targetPrefix,
+			TargetSuffix: targetSuffix,
 		})
 	}
 

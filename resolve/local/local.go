@@ -649,12 +649,12 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 	nodeModulesPath, pkgName, rootDir string,
 	graph *resolve.DependencyGraph,
 ) {
-	// Check if already visited (atomic)
-	if _, loaded := visited.LoadOrStore(pkgName, true); loaded {
+	pkgPath := filepath.Join(nodeModulesPath, pkgName)
+
+	// Use resolved path as visited key so nested copies are distinct
+	if _, loaded := visited.LoadOrStore(pkgPath, true); loaded {
 		return
 	}
-
-	pkgPath := filepath.Join(nodeModulesPath, pkgName)
 	pkgJSONPath := filepath.Join(pkgPath, "package.json")
 
 	pkg, err := r.parsePackageJSON(pkgJSONPath)
@@ -715,7 +715,8 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			scopeEntries[depName+e.Key] = url
 		}
 
-		// Recursively process (will be deduped by visited map)
+		// Recursively process from the resolved location so nested copies
+		// use their own node_modules when resolving further transitive deps.
 		r.processPackageDependenciesParallelWithGraph(im, mu, visited, nodeModulesPath, depName, rootDir, graph)
 	}
 

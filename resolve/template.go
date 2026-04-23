@@ -104,8 +104,8 @@ func (t *Template) HasVersion() bool {
 // For "name" returns ("name", "").
 func SplitPackageName(pkg string) (name, scope string) {
 	if strings.HasPrefix(pkg, "@") {
-		if scope, name, ok := strings.Cut(pkg, "/"); ok {
-			return name, strings.TrimPrefix(scope, "@")
+		if s, n, ok := strings.Cut(pkg, "/"); ok {
+			return n, strings.TrimPrefix(s, "@")
 		}
 		return pkg, ""
 	}

@@ -272,26 +272,5 @@ func TestInjectBatch_MultipleFiles(t *testing.T) {
 
 func setupInjectFixture(t *testing.T) *mapfs.MapFileSystem {
 	t.Helper()
-	mfs := mapfs.New()
-	mfs.AddFile("/project/package.json", `{
-		"name": "test-project",
-		"dependencies": {"lit": "^3.0.0"}
-	}`, 0644)
-	mfs.AddFile("/project/node_modules/lit/package.json", `{
-		"name": "lit",
-		"version": "3.0.0",
-		"exports": {".": "./index.js"}
-	}`, 0644)
-	mfs.AddFile("/project/node_modules/lit/index.js", `export class LitElement {}`, 0644)
-	mfs.AddFile("/project/index.html", `<!DOCTYPE html>
-<html>
-<head>
-  <title>Test</title>
-  <script type="module">
-    import { LitElement } from 'lit';
-  </script>
-</head>
-<body></body>
-</html>`, 0644)
-	return mfs
+	return testutil.NewFixtureFS(t, "inject/no-importmap", "/project")
 }

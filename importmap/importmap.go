@@ -311,8 +311,8 @@ func simplifyImports(imports map[string]string) map[string]string {
 				baseTarget := imports[tsKey]
 				if baseTarget+relPath == value {
 					covered = true
+					break
 				}
-				break
 			}
 		}
 
