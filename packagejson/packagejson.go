@@ -63,6 +63,10 @@ type PackageJSON struct {
 	Dependencies map[string]string `json:"dependencies,omitempty"`
 	// DevDependencies maps dev package names to version specifiers.
 	DevDependencies map[string]string `json:"devDependencies,omitempty"`
+	// PeerDependencies maps peer package names to version specifiers.
+	PeerDependencies map[string]string `json:"peerDependencies,omitempty"`
+	// OptionalDependencies maps optional package names to version specifiers.
+	OptionalDependencies map[string]string `json:"optionalDependencies,omitempty"`
 	// RawWorkspaces holds the raw JSON for the workspaces field.
 	// Use WorkspacePatterns() to extract the patterns.
 	RawWorkspaces json.RawMessage `json:"workspaces,omitempty"`
@@ -123,6 +127,58 @@ func ParseFile(fs fs.FileSystem, path string) (*PackageJSON, error) {
 		return nil, err
 	}
 	return Parse(data)
+}
+
+// ErrNotImported is returned when a subpath import is not defined in the package.
+var ErrNotImported = errors.New("not defined in package.json imports")
+
+// ResolveImport resolves a subpath import (e.g., "#internal") to its target.
+// Subpath imports are defined in the "imports" field of package.json and allow
+// packages to create internal aliases starting with #.
+// Pass nil for opts to use DefaultConditions.
+func (pkg *PackageJSON) ResolveImport(specifier string, opts *ResolveOptions) (string, error) {
+	if pkg.Imports == nil {
+		return "", ErrNotImported
+	}
+
+	importsMap, ok := pkg.Imports.(map[string]any)
+	if !ok {
+		return "", ErrNotImported
+	}
+
+	// Direct match
+	if value, ok := importsMap[specifier]; ok {
+		return resolveExportValueWithOpts(value, opts)
+	}
+
+	// Try wildcard pattern matching
+	var patterns []string
+	for pattern := range importsMap {
+		if strings.Contains(pattern, "*") {
+			patterns = append(patterns, pattern)
+		}
+	}
+	sort.Slice(patterns, func(i, j int) bool {
+		return len(patterns[i]) > len(patterns[j])
+	})
+
+	for _, pattern := range patterns {
+		value := importsMap[pattern]
+		matched, captured := matchExportPattern(pattern, specifier)
+		if !matched {
+			continue
+		}
+		target, err := resolveExportValueWithOpts(value, opts)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(target, "*") {
+			return strings.Replace(target, "*", captured, 1), nil
+		}
+		return target, nil
+	}
+
+	return "", ErrNotImported
 }
 
 // ResolveExport resolves a subpath export to its target file path.

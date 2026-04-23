@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "lit-html": "/node_modules/lit-html/lit-html.js"
+  },
+  "scopes": {
+    "/node_modules/other-pkg/": {
+      "lit-html": "/node_modules/lit-html/OTHER.js"
+    }
+  }
+}

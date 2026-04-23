@@ -1,0 +1,7 @@
+{
+  "name": "nested-test",
+  "dependencies": {
+    "parent-pkg": "^1.0.0",
+    "shared-dep": "^1.0.0"
+  }
+}

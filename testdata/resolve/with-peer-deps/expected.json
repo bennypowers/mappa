@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "plugin-pkg": "/node_modules/plugin-pkg/index.js",
+    "framework": "/node_modules/framework/index.js"
+  },
+  "scopes": {
+    "/node_modules/plugin-pkg/": {
+      "framework": "/node_modules/framework/index.js"
+    }
+  }
+}

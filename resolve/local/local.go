@@ -747,7 +747,19 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 		return
 	}
 
-	if len(pkg.Dependencies) == 0 {
+	// Collect all deps that affect scope: regular + peer + optional
+	allDeps := make(map[string]bool)
+	for name := range pkg.Dependencies {
+		allDeps[name] = true
+	}
+	for name := range pkg.PeerDependencies {
+		allDeps[name] = true
+	}
+	for name := range pkg.OptionalDependencies {
+		allDeps[name] = true
+	}
+
+	if len(allDeps) == 0 {
 		return
 	}
 
@@ -766,14 +778,14 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 	scopeEntries := make(map[string]string)
 	opts := r.resolveOpts()
 
-	for depName := range pkg.Dependencies {
+	for depName := range allDeps {
 		// Track dependency relationship in graph
 		if graph != nil {
 			graph.AddDependency(pkgName, depName)
 		}
 
-		depPath := filepath.Join(nodeModulesPath, depName)
-		if !r.fs.Exists(depPath) {
+		depPath, isNested := r.findDependencyPath(pkgPath, nodeModulesPath, depName)
+		if depPath == "" {
 			continue
 		}
 
@@ -783,6 +795,10 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			continue
 		}
 
+		expand := func(filePath string) string {
+			return r.expandDepURL(depName, filePath, isNested, depPath, rootDir)
+		}
+
 		// Handle wildcard exports (trailing slash imports)
 		wildcards := depPkg.WildcardExports(opts)
 
@@ -790,12 +806,12 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 		for _, w := range wildcards {
 			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
 			importKey := depName + "/" + patternPrefix
-			scopeEntries[importKey] = r.template.Expand(depName, "", w.Target)
+			scopeEntries[importKey] = expand(w.Target)
 		}
 
 		// For packages with no wildcards but trailing-slash support, add trailing-slash key
 		if len(wildcards) == 0 && depPkg.HasTrailingSlashExport(opts) {
-			scopeEntries[depName+"/"] = r.template.Expand(depName, "", "")
+			scopeEntries[depName+"/"] = expand("")
 		}
 
 		// Add export entries - explicit exports are never skipped since they may
@@ -809,12 +825,12 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 				subpath := strings.TrimPrefix(entry.Subpath, "./")
 				importKey = depName + "/" + subpath
 			}
-			scopeEntries[importKey] = r.template.Expand(depName, "", entry.Target)
+			scopeEntries[importKey] = expand(entry.Target)
 		}
 
 		// Fallback to main if no exports
 		if len(entries) == 0 && depPkg.Main != "" {
-			scopeEntries[depName] = r.template.Expand(depName, "", strings.TrimPrefix(depPkg.Main, "./"))
+			scopeEntries[depName] = expand(strings.TrimPrefix(depPkg.Main, "./"))
 		}
 
 		// Recursively process (will be deduped by visited map)
@@ -833,6 +849,36 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 		maps.Copy(im.Scopes[scopeKey], scopeEntries)
 		mu.Unlock()
 	}
+}
+
+// findDependencyPath locates a dependency, checking nested node_modules first.
+// npm may install a different version of a transitive dep inside the parent's
+// own node_modules when the hoisted version doesn't satisfy the constraint.
+// Returns the path and whether it was found in nested node_modules.
+func (r *Resolver) findDependencyPath(parentPkgPath, rootNodeModules, depName string) (string, bool) {
+	nested := filepath.Join(parentPkgPath, "node_modules", depName)
+	if r.fs.Exists(nested) {
+		return nested, true
+	}
+	hoisted := filepath.Join(rootNodeModules, depName)
+	if r.fs.Exists(hoisted) {
+		return hoisted, false
+	}
+	return "", false
+}
+
+// expandDepURL returns the URL for a dependency's file. For hoisted deps it
+// uses the template; for nested deps it computes a path relative to the
+// workspace root so the browser can find the nested copy.
+func (r *Resolver) expandDepURL(depName, filePath string, nested bool, depPath, rootDir string) string {
+	if !nested {
+		return r.template.Expand(depName, "", filePath)
+	}
+	rel, err := filepath.Rel(rootDir, filepath.Join(depPath, filePath))
+	if err != nil {
+		return r.template.Expand(depName, "", filePath)
+	}
+	return "/" + filepath.ToSlash(rel)
 }
 
 // parsePackageName extracts the package name from a package spec.

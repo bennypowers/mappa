@@ -62,12 +62,14 @@ func init() {
 	Cmd.Flags().StringArray("include-package", nil, "Additional packages to include (can be repeated)")
 	Cmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
+	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify (default), 2=simplify+dedup scopes")
 
 	_ = viper.BindPFlag("format", Cmd.Flags().Lookup("format"))
 	_ = viper.BindPFlag("input-map", Cmd.Flags().Lookup("input-map"))
 	_ = viper.BindPFlag("include-package", Cmd.Flags().Lookup("include-package"))
 	_ = viper.BindPFlag("template", Cmd.Flags().Lookup("template"))
 	_ = viper.BindPFlag("conditions", Cmd.Flags().Lookup("conditions"))
+	_ = viper.BindPFlag("optimize", Cmd.Flags().Lookup("optimize"))
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -126,8 +128,11 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve: %w", err)
 	}
 
-	// Simplify the import map to remove entries covered by trailing-slash keys
-	simplifiedMap := generatedMap.Simplify()
+	optimizeLevel := viper.GetInt("optimize")
+	outputMap := generatedMap
+	if optimizeLevel >= 1 {
+		outputMap = outputMap.Simplify()
+	}
 
-	return output.ImportMap(osfs, simplifiedMap, format)
+	return output.ImportMap(osfs, outputMap, format)
 }

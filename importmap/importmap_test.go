@@ -72,6 +72,27 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestParseMalformedJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"invalid json", "{bad}"},
+		{"truncated", `{"imports": {`},
+		{"wrong type", `"just a string"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := importmap.Parse([]byte(tt.input))
+			if err == nil {
+				t.Error("Expected error for malformed JSON")
+			}
+		})
+	}
+}
+
 func TestMerge(t *testing.T) {
 	tests := []struct {
 		name string
@@ -172,6 +193,7 @@ func TestSimplify(t *testing.T) {
 		{"with scopes", "simplify-with-scopes"},
 		{"no trailing-slash keys", "simplify-no-trailing-slash"},
 		{"keeps bare specifier alongside trailing slash", "simplify-keeps-bare-specifier"},
+		{"deduplicates scopes matching top-level imports", "simplify-dedup-scopes"},
 	}
 
 	for _, tt := range tests {

@@ -525,3 +525,48 @@ func TestFindInsertPoint_NoHead(t *testing.T) {
 		t.Errorf("Expected Found=false for HTML without head")
 	}
 }
+
+func TestTraceHTML_CircularModules(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/circular-modules", "/test")
+	tracer := NewTracer(mfs, "/test")
+
+	graph, err := tracer.TraceHTML("/test/index.html")
+	if err != nil {
+		t.Fatalf("TraceHTML with circular modules failed: %v", err)
+	}
+
+	if len(graph.Modules) != 2 {
+		t.Errorf("Expected 2 modules (a.js, b.js), got %d", len(graph.Modules))
+		for path := range graph.Modules {
+			t.Logf("  Module: %s", path)
+		}
+	}
+
+	if len(graph.Entrypoints) != 1 {
+		t.Errorf("Expected 1 entrypoint, got %d", len(graph.Entrypoints))
+	}
+}
+
+func TestExtractImports_NamespaceReExport(t *testing.T) {
+	js := []byte("export * as ns from 'namespace-module';\nexport * from 'star-module';\n")
+	imports, err := ExtractImports(js)
+	if err != nil {
+		t.Fatalf("ExtractImports failed: %v", err)
+	}
+	if len(imports) != 2 {
+		t.Fatalf("Expected 2 imports, got %d: %+v", len(imports), imports)
+	}
+	specs := make(map[string]bool)
+	for _, imp := range imports {
+		specs[imp.Specifier] = true
+		if imp.IsDynamic {
+			t.Errorf("Re-export %q should not be dynamic", imp.Specifier)
+		}
+	}
+	if !specs["namespace-module"] {
+		t.Error("Missing namespace-module from export * as ns")
+	}
+	if !specs["star-module"] {
+		t.Error("Missing star-module from export *")
+	}
+}

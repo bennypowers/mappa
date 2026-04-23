@@ -215,11 +215,24 @@ func (im *ImportMap) Simplify() *ImportMap {
 		result.Imports = simplifyImports(im.Imports)
 	}
 
-	// Simplify each scope, omitting scopes that become empty
+	// Simplify each scope, omitting scopes that become empty or redundant
 	if im.Scopes != nil {
 		result.Scopes = make(map[string]map[string]string, len(im.Scopes))
 		for scope, imports := range im.Scopes {
 			simplified := simplifyImports(imports)
+			if len(simplified) == 0 {
+				continue
+			}
+			// Remove scope entries that are identical to top-level imports
+			if result.Imports != nil {
+				deduplicated := make(map[string]string)
+				for key, value := range simplified {
+					if topLevel, ok := result.Imports[key]; !ok || topLevel != value {
+						deduplicated[key] = value
+					}
+				}
+				simplified = deduplicated
+			}
 			if len(simplified) > 0 {
 				result.Scopes[scope] = simplified
 			}

@@ -59,6 +59,9 @@ func TestResolver(t *testing.T) {
 		{"simple package", "simple-pkg"},
 		{"with scopes", "with-scopes"},
 		{"scope simplification with wildcards", "with-wildcard-scopes"},
+		{"circular dependencies", "circular-deps"},
+		{"nested node_modules", "nested-node-modules"},
+		{"peer dependencies in scopes", "with-peer-deps"},
 	}
 
 	for _, tt := range tests {

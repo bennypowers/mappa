@@ -644,3 +644,106 @@ func TestHasWorkspaces(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveImport(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/subpath-imports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Resolutions map[string]string `json:"resolutions"`
+		Blocked     []string          `json:"blocked"`
+		NotFound    []string          `json:"not_found"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	for specifier, want := range expected.Resolutions {
+		t.Run("resolves "+specifier, func(t *testing.T) {
+			resolved, err := pkg.ResolveImport(specifier, nil)
+			if err != nil {
+				t.Fatalf("ResolveImport(%q) failed: %v", specifier, err)
+			}
+			if resolved != want {
+				t.Errorf("ResolveImport(%q) = %q, want %q", specifier, resolved, want)
+			}
+		})
+	}
+
+	for _, blocked := range expected.Blocked {
+		t.Run("blocks "+blocked, func(t *testing.T) {
+			_, err := pkg.ResolveImport(blocked, nil)
+			if err == nil {
+				t.Errorf("ResolveImport(%q) should fail for null import", blocked)
+			}
+		})
+	}
+
+	for _, nf := range expected.NotFound {
+		t.Run("not found "+nf, func(t *testing.T) {
+			_, err := pkg.ResolveImport(nf, nil)
+			if err != packagejson.ErrNotImported {
+				t.Errorf("ResolveImport(%q) should return ErrNotImported, got %v", nf, err)
+			}
+		})
+	}
+}
+
+func TestResolveImportNoImportsField(t *testing.T) {
+	pkg := &packagejson.PackageJSON{Name: "test"}
+	_, err := pkg.ResolveImport("#anything", nil)
+	if err != packagejson.ErrNotImported {
+		t.Errorf("Expected ErrNotImported for package without imports field, got %v", err)
+	}
+}
+
+func TestParseMalformedJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty string", ""},
+		{"invalid json", "{invalid}"},
+		{"truncated json", `{"name": "test`},
+		{"array instead of object", `["not", "an", "object"]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := packagejson.Parse([]byte(tt.input))
+			if err == nil {
+				t.Error("Expected error for malformed JSON")
+			}
+		})
+	}
+}
+
+func TestPeerAndOptionalDependencies(t *testing.T) {
+	input := `{
+		"name": "test-pkg",
+		"dependencies": {"dep-a": "^1.0.0"},
+		"peerDependencies": {"peer-b": "^2.0.0"},
+		"optionalDependencies": {"opt-c": "^3.0.0"}
+	}`
+
+	pkg, err := packagejson.Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if pkg.PeerDependencies["peer-b"] != "^2.0.0" {
+		t.Errorf("Expected peer dep peer-b, got %v", pkg.PeerDependencies)
+	}
+	if pkg.OptionalDependencies["opt-c"] != "^3.0.0" {
+		t.Errorf("Expected optional dep opt-c, got %v", pkg.OptionalDependencies)
+	}
+}

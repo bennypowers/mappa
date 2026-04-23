@@ -1,0 +1,9 @@
+{
+  "resolutions": {
+    "#internal": "src/internal.js",
+    "#utils/helpers": "src/utils/helpers.js",
+    "#config": "src/config-browser.js"
+  },
+  "blocked": ["#blocked"],
+  "not_found": ["#nonexistent"]
+}
