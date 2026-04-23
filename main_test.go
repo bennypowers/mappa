@@ -577,6 +577,7 @@ func TestHelp(t *testing.T) {
 		"mappa",
 		"generate",
 		"trace",
+		"validate",
 		"--package",
 		"--output",
 	}
@@ -822,6 +823,150 @@ func TestInjectJSONFormat(t *testing.T) {
 				t.Fatalf("Failed to parse JSON line: %v\nline: %s", err, line)
 			}
 		}
+	}
+}
+
+func TestValidateValid(t *testing.T) {
+	fixtureFile := filepath.Join("testdata", "validate", "valid", "input.json")
+
+	stdout, stderr, code := runCLI(t, "validate", fixtureFile)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for valid import map, got %d\nstderr: %s\nstdout: %s", code, stderr, stdout)
+	}
+}
+
+func TestValidateInvalid(t *testing.T) {
+	fixtureFile := filepath.Join("testdata", "validate", "invalid", "input.json")
+
+	_, stderr, code := runCLI(t, "validate", fixtureFile)
+	if code == 0 {
+		t.Fatal("Expected non-zero exit code for invalid import map")
+	}
+
+	if !strings.Contains(stderr, "Error:") {
+		t.Errorf("Expected validation errors on stderr, got: %s", stderr)
+	}
+
+	if !strings.Contains(stderr, "trailing-slash") {
+		t.Errorf("Expected trailing-slash error, got: %s", stderr)
+	}
+}
+
+func TestValidateStdin(t *testing.T) {
+	binary := filepath.Join(mustGetwd(), "mappa_test")
+	cmd := exec.Command(binary, "validate")
+	cmd.Stdin = strings.NewReader(`{
+  "imports": {
+    "lit": "/node_modules/lit/index.js"
+  }
+}`)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("Expected exit code 0 for valid stdin input, got error: %v\nstderr: %s", err, stderrBuf.String())
+	}
+}
+
+func TestValidateStdinInvalid(t *testing.T) {
+	binary := filepath.Join(mustGetwd(), "mappa_test")
+	cmd := exec.Command(binary, "validate")
+	cmd.Stdin = strings.NewReader(`{
+  "imports": {
+    "lit/": "/node_modules/lit"
+  }
+}`)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("Expected non-zero exit code for invalid stdin input")
+	}
+
+	stderr := stderrBuf.String()
+	if !strings.Contains(stderr, "trailing-slash") {
+		t.Errorf("Expected trailing-slash error on stderr, got: %s", stderr)
+	}
+}
+
+func TestValidateFormatJSON(t *testing.T) {
+	fixtureFile := filepath.Join("testdata", "validate", "invalid", "input.json")
+
+	stdout, _, code := runCLI(t, "validate", fixtureFile, "--format", "json")
+	if code == 0 {
+		t.Fatal("Expected non-zero exit code for invalid import map")
+	}
+
+	// stdout should be valid JSON array
+	var errs []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &errs); err != nil {
+		t.Fatalf("Expected valid JSON array on stdout, got error: %v\nstdout: %s", err, stdout)
+	}
+
+	if len(errs) == 0 {
+		t.Fatal("Expected non-empty JSON array of errors")
+	}
+
+	// Each error should have a Message field
+	for i, e := range errs {
+		if e["Message"] == nil {
+			t.Errorf("Error %d missing 'Message' field: %v", i, e)
+		}
+	}
+}
+
+func TestValidateFormatJSONValid(t *testing.T) {
+	fixtureFile := filepath.Join("testdata", "validate", "valid", "input.json")
+
+	stdout, _, code := runCLI(t, "validate", fixtureFile, "--format", "json")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for valid import map, got %d", code)
+	}
+
+	// stdout should be valid JSON with empty/null array
+	var errs []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &errs); err != nil {
+		t.Fatalf("Expected valid JSON on stdout, got error: %v\nstdout: %s", err, stdout)
+	}
+
+	if len(errs) != 0 {
+		t.Errorf("Expected empty array for valid import map, got %d errors", len(errs))
+	}
+}
+
+func TestValidateHelp(t *testing.T) {
+	stdout, _, code := runCLI(t, "validate", "--help")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 for help, got %d", code)
+	}
+
+	expectedStrings := []string{
+		"--format",
+		"Validate",
+		"import map",
+	}
+
+	for _, s := range expectedStrings {
+		if !strings.Contains(stdout, s) {
+			t.Errorf("Expected %q in validate help output", s)
+		}
+	}
+}
+
+func TestValidateMissingFile(t *testing.T) {
+	_, stderr, code := runCLI(t, "validate", "nonexistent.json")
+	if code == 0 {
+		t.Fatal("Expected non-zero exit code for missing file")
+	}
+
+	if !strings.Contains(stderr, "Error") {
+		t.Errorf("Expected error message, got: %s", stderr)
 	}
 }
 

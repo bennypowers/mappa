@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "lit/": "/node_modules/lit",
+    "bare": "not-a-valid-url",
+    "empty": ""
+  }
+}

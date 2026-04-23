@@ -30,6 +30,7 @@ import (
 	"bennypowers.dev/mappa/cmd/generate"
 	"bennypowers.dev/mappa/cmd/inject"
 	"bennypowers.dev/mappa/cmd/trace"
+	"bennypowers.dev/mappa/cmd/validate"
 	"bennypowers.dev/mappa/cmd/version"
 )
 
@@ -82,6 +83,7 @@ func init() {
 	rootCmd.AddCommand(generate.Cmd)
 	rootCmd.AddCommand(inject.Cmd)
 	rootCmd.AddCommand(trace.Cmd)
+	rootCmd.AddCommand(validate.Cmd)
 	rootCmd.AddCommand(version.Cmd)
 }
 
