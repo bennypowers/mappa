@@ -342,10 +342,18 @@ func TestValidationErrorString(t *testing.T) {
 		}
 	})
 
-	t.Run("scope error", func(t *testing.T) {
+	t.Run("scope entry error", func(t *testing.T) {
 		e := &importmap.ValidationError{Key: "lit/", Value: "/bad", Scope: "/scope/", Message: "test msg"}
 		s := e.Error()
 		if s != `scope "/scope/" key "lit/": test msg` {
+			t.Errorf("Unexpected error string: %s", s)
+		}
+	})
+
+	t.Run("scope prefix error", func(t *testing.T) {
+		e := &importmap.ValidationError{Scope: "bad-scope", Message: "invalid scope"}
+		s := e.Error()
+		if s != `scope "bad-scope": invalid scope` {
 			t.Errorf("Unexpected error string: %s", s)
 		}
 	})

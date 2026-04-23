@@ -35,8 +35,11 @@ type ValidationError struct {
 }
 
 func (e *ValidationError) Error() string {
-	if e.Scope != "" {
+	if e.Scope != "" && e.Key != "" {
 		return fmt.Sprintf("scope %q key %q: %s", e.Scope, e.Key, e.Message)
+	}
+	if e.Scope != "" {
+		return fmt.Sprintf("scope %q: %s", e.Scope, e.Message)
 	}
 	return fmt.Sprintf("key %q: %s", e.Key, e.Message)
 }
@@ -53,7 +56,7 @@ func (im *ImportMap) Validate() []*ValidationError {
 	for scope, imports := range im.Scopes {
 		if !isValidSpecifierValue(scope) {
 			errs = append(errs, &ValidationError{
-				Key:     scope,
+				Scope:   scope,
 				Message: "scope key must be a valid URL or start with /, ./, or ../",
 			})
 		}

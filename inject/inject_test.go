@@ -47,14 +47,11 @@ func TestBuildNewContent_InsertNew(t *testing.T) {
 	if !inserted {
 		t.Error("Expected inserted=true for new import map")
 	}
-	if !strings.Contains(string(result), `<script type="importmap">`) {
-		t.Error("Result should contain importmap script tag")
-	}
-	if !strings.Contains(string(result), `"lit"`) {
-		t.Error("Result should contain lit import")
-	}
-	if !strings.Contains(string(result), `<script type="module"`) {
-		t.Error("Result should preserve existing module script")
+
+	testutil.UpdateGoldenFile(t, "inject/build-insert-new/expected.html", result)
+	golden := testutil.LoadGoldenFile(t, "inject/build-insert-new/expected.html")
+	if golden != nil && string(result) != string(golden) {
+		t.Errorf("Output mismatch.\n  got:\n%s\n  want:\n%s", string(result), string(golden))
 	}
 }
 
@@ -83,11 +80,11 @@ func TestBuildNewContent_ReplaceExisting(t *testing.T) {
 	if inserted {
 		t.Error("Expected inserted=false when replacing existing")
 	}
-	if strings.Contains(string(result), `"old"`) {
-		t.Error("Result should not contain old import")
-	}
-	if !strings.Contains(string(result), `"new-pkg"`) {
-		t.Error("Result should contain new import")
+
+	testutil.UpdateGoldenFile(t, "inject/build-replace-existing/expected.html", result)
+	golden := testutil.LoadGoldenFile(t, "inject/build-replace-existing/expected.html")
+	if golden != nil && string(result) != string(golden) {
+		t.Errorf("Output mismatch.\n  got:\n%s\n  want:\n%s", string(result), string(golden))
 	}
 }
 
@@ -215,8 +212,8 @@ func TestInjectBatch_InvalidTemplate(t *testing.T) {
 			t.Error("Expected error for invalid template variable")
 		}
 	}
-	if count == 0 {
-		t.Fatal("Expected at least one result from InjectBatch")
+	if count != 1 {
+		t.Fatalf("Expected exactly 1 result, got %d", count)
 	}
 }
 
@@ -235,8 +232,8 @@ func TestInjectBatch_MissingFile(t *testing.T) {
 			t.Errorf("Expected file path in result, got %s", r.File)
 		}
 	}
-	if count == 0 {
-		t.Fatal("Expected at least one result from InjectBatch")
+	if count != 1 {
+		t.Fatalf("Expected exactly 1 result, got %d", count)
 	}
 }
 
