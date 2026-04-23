@@ -129,6 +129,57 @@ func ParseFile(fs fs.FileSystem, path string) (*PackageJSON, error) {
 	return Parse(data)
 }
 
+// ImportMapEntry represents a single key-path pair for building import maps.
+type ImportMapEntry struct {
+	Key  string // Import key relative to package name (e.g., "", "/", "/utils")
+	Path string // Target path relative to package root (e.g., "index.js", "dist/")
+}
+
+// ImportMapEntries returns all entries needed for an import map: explicit
+// exports, wildcard trailing-slash keys, and a plain trailing-slash fallback
+// for packages with no exports. The caller maps each entry's Path to a URL.
+//
+// Key conventions:
+//   - "" means the bare package specifier (e.g., "lit")
+//   - "/" means a trailing-slash key (e.g., "lit/")
+//   - "/sub" means a subpath key (e.g., "lit/sub")
+func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry {
+	var result []ImportMapEntry
+
+	entries := pkg.ExportEntries(opts)
+	for _, entry := range entries {
+		var key string
+		if entry.Subpath == "." {
+			key = ""
+		} else {
+			key = "/" + trimDotSlash(entry.Subpath)
+		}
+		result = append(result, ImportMapEntry{Key: key, Path: entry.Target})
+	}
+
+	wildcards := pkg.WildcardExports(opts)
+	for _, w := range wildcards {
+		patternPrefix := strings.TrimSuffix(trimDotSlash(w.Pattern), "*")
+		result = append(result, ImportMapEntry{
+			Key:  "/" + patternPrefix,
+			Path: w.Target,
+		})
+	}
+
+	if len(entries) == 0 && pkg.Main != "" {
+		result = append(result, ImportMapEntry{
+			Key:  "",
+			Path: trimDotSlash(pkg.Main),
+		})
+	}
+
+	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
+		result = append(result, ImportMapEntry{Key: "/", Path: ""})
+	}
+
+	return result
+}
+
 // ErrNotImported is returned when a subpath import is not defined in the package.
 var ErrNotImported = errors.New("not defined in package.json imports")
 

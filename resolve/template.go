@@ -113,5 +113,22 @@ func SplitPackageName(pkg string) (name, scope string) {
 	return pkg, ""
 }
 
+// PackageName extracts the package name from a bare specifier.
+// For "lit/decorators.js" returns "lit".
+// For "@scope/pkg/subpath" returns "@scope/pkg".
+func PackageName(specifier string) string {
+	if strings.HasPrefix(specifier, "@") {
+		parts := strings.SplitN(specifier, "/", 3)
+		if len(parts) >= 2 {
+			return parts[0] + "/" + parts[1]
+		}
+		return specifier
+	}
+	if idx := strings.Index(specifier, "/"); idx > 0 {
+		return specifier[:idx]
+	}
+	return specifier
+}
+
 // DefaultLocalTemplate is the default template for local resolution.
 const DefaultLocalTemplate = "/node_modules/{package}/{path}"

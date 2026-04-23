@@ -558,38 +558,9 @@ func (r *Resolver) addWorkspacePackageToImportMapWithGraph(im *importmap.ImportM
 	// Calculate web path relative to rootDir
 	webPath := resolve.ToWebPath(rootDir, pkg.Path)
 
-	// Get all export entries
 	opts := r.resolveOpts()
-	entries := pkgJSON.ExportEntries(opts)
-	for _, entry := range entries {
-		var importKey string
-		if entry.Subpath == "." {
-			importKey = pkg.Name
-		} else {
-			subpath := strings.TrimPrefix(entry.Subpath, "./")
-			importKey = pkg.Name + "/" + subpath
-		}
-		target := strings.TrimPrefix(entry.Target, "./")
-		im.Imports[importKey] = webPath + "/" + target
-	}
-
-	// Handle wildcard exports (trailing slash imports)
-	wildcards := pkgJSON.WildcardExports(opts)
-	for _, w := range wildcards {
-		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-		importKey := pkg.Name + "/" + patternPrefix
-		target := strings.TrimSuffix(w.Target, "*")
-		im.Imports[importKey] = webPath + "/" + target
-	}
-
-	// Fallback to main if no exports
-	if len(entries) == 0 && pkgJSON.Main != "" {
-		im.Imports[pkg.Name] = webPath + "/" + strings.TrimPrefix(pkgJSON.Main, "./")
-	}
-
-	// Add trailing slash for packages that support it
-	if pkgJSON.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
-		im.Imports[pkg.Name+"/"] = webPath + "/"
+	for _, e := range pkgJSON.ImportMapEntries(opts) {
+		im.Imports[pkg.Name+e.Key] = webPath + "/" + e.Path
 	}
 
 	return nil
@@ -598,41 +569,10 @@ func (r *Resolver) addWorkspacePackageToImportMapWithGraph(im *importmap.ImportM
 // addRootPackageExports adds the root package's own exports to the import map.
 // This allows importing the package by name in development (e.g., import { x } from 'my-lib').
 func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejson.PackageJSON) error {
-	// Get all export entries
 	opts := r.resolveOpts()
-	entries := pkg.ExportEntries(opts)
-	for _, entry := range entries {
-		var importKey string
-		if entry.Subpath == "." {
-			importKey = pkg.Name
-		} else {
-			subpath := strings.TrimPrefix(entry.Subpath, "./")
-			importKey = pkg.Name + "/" + subpath
-		}
-		// Root package exports use relative paths from root (e.g., ./lib/index.js -> /lib/index.js)
-		target := "/" + strings.TrimPrefix(entry.Target, "./")
-		im.Imports[importKey] = target
+	for _, e := range pkg.ImportMapEntries(opts) {
+		im.Imports[pkg.Name+e.Key] = "/" + e.Path
 	}
-
-	// Handle wildcard exports
-	wildcards := pkg.WildcardExports(opts)
-	for _, w := range wildcards {
-		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-		importKey := pkg.Name + "/" + patternPrefix
-		target := "/" + strings.TrimSuffix(strings.TrimPrefix(w.Target, "./"), "*")
-		im.Imports[importKey] = target
-	}
-
-	// Fallback to main if no exports
-	if len(entries) == 0 && pkg.Main != "" {
-		im.Imports[pkg.Name] = "/" + strings.TrimPrefix(pkg.Main, "./")
-	}
-
-	// Add trailing slash for packages that support it
-	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
-		im.Imports[pkg.Name+"/"] = "/"
-	}
-
 	return nil
 }
 
@@ -654,28 +594,8 @@ func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *s
 	imports := make(map[string]string)
 	opts := r.resolveOpts()
 
-	entries := pkg.ExportEntries(opts)
-	for _, entry := range entries {
-		var importKey string
-		if entry.Subpath == "." {
-			importKey = pkgName
-		} else {
-			subpath := strings.TrimPrefix(entry.Subpath, "./")
-			importKey = pkgName + "/" + subpath
-		}
-		imports[importKey] = r.template.Expand(pkgName, "", entry.Target)
-	}
-
-	wildcards := pkg.WildcardExports(opts)
-	for _, w := range wildcards {
-		patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-		importKey := pkgName + "/" + patternPrefix
-		imports[importKey] = r.template.Expand(pkgName, "", w.Target)
-	}
-
-	// Fallback to main if no exports
-	if len(entries) == 0 && pkg.Main != "" {
-		imports[pkgName] = r.template.Expand(pkgName, "", strings.TrimPrefix(pkg.Main, "./"))
+	for _, e := range pkg.ImportMapEntries(opts) {
+		imports[pkgName+e.Key] = r.template.Expand(pkgName, "", e.Path)
 	}
 
 	// Warn if bare specifier won't work (no root export and no main fallback)
@@ -683,11 +603,6 @@ func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *s
 		if r.logger != nil {
 			r.logger.Warning("Package '%s' has no root export or main field; only subpath imports will work", pkgName)
 		}
-	}
-
-	// Add trailing slash for packages that support it
-	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
-		imports[pkgName+"/"] = r.template.Expand(pkgName, "", "")
 	}
 
 	// Merge into import map under lock
@@ -795,42 +710,9 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			continue
 		}
 
-		expand := func(filePath string) string {
-			return r.expandDepURL(depName, filePath, isNested, depPath, rootDir)
-		}
-
-		// Handle wildcard exports (trailing slash imports)
-		wildcards := depPkg.WildcardExports(opts)
-
-		// Add trailing-slash keys for wildcard exports
-		for _, w := range wildcards {
-			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-			importKey := depName + "/" + patternPrefix
-			scopeEntries[importKey] = expand(w.Target)
-		}
-
-		// For packages with no wildcards but trailing-slash support, add trailing-slash key
-		if len(wildcards) == 0 && depPkg.HasTrailingSlashExport(opts) {
-			scopeEntries[depName+"/"] = expand("")
-		}
-
-		// Add export entries - explicit exports are never skipped since they may
-		// have different targets than wildcard patterns would provide
-		entries := depPkg.ExportEntries(opts)
-		for _, entry := range entries {
-			var importKey string
-			if entry.Subpath == "." {
-				importKey = depName
-			} else {
-				subpath := strings.TrimPrefix(entry.Subpath, "./")
-				importKey = depName + "/" + subpath
-			}
-			scopeEntries[importKey] = expand(entry.Target)
-		}
-
-		// Fallback to main if no exports
-		if len(entries) == 0 && depPkg.Main != "" {
-			scopeEntries[depName] = expand(strings.TrimPrefix(depPkg.Main, "./"))
+		for _, e := range depPkg.ImportMapEntries(opts) {
+			url := r.expandDepURL(depName, e.Path, isNested, depPath, rootDir)
+			scopeEntries[depName+e.Key] = url
 		}
 
 		// Recursively process (will be deduped by visited map)
@@ -882,21 +764,8 @@ func (r *Resolver) expandDepURL(depName, filePath string, nested bool, depPath, 
 }
 
 // parsePackageName extracts the package name from a package spec.
-// Handles scoped packages (@scope/name) and subpaths (lit/decorators.js).
 func parsePackageName(spec string) string {
-	if strings.HasPrefix(spec, "@") {
-		// Scoped package: @scope/name or @scope/name/subpath
-		parts := strings.SplitN(spec, "/", 3)
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
-		}
-		return spec
-	}
-	// Regular package: name or name/subpath
-	if idx := strings.Index(spec, "/"); idx > 0 {
-		return spec[:idx]
-	}
-	return spec
+	return resolve.PackageName(spec)
 }
 
 // ResolveIncremental updates an existing import map based on changed packages.

@@ -19,7 +19,6 @@ package trace
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -444,15 +443,5 @@ func (g *ModuleGraph) PackageNames() []string {
 
 // getPackageName extracts the package name from a bare specifier.
 func getPackageName(specifier string) string {
-	// Handle scoped packages: @scope/package/path -> @scope/package
-	if strings.HasPrefix(specifier, "@") {
-		parts := strings.SplitN(specifier, "/", 3)
-		if len(parts) >= 2 {
-			return path.Join(parts[0], parts[1])
-		}
-		return specifier
-	}
-	// Regular package: package/path -> package
-	parts := strings.SplitN(specifier, "/", 2)
-	return parts[0]
+	return resolve.PackageName(specifier)
 }
