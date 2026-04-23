@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "lit": "/node_modules/lit/index.js",
+    "@example/utils": "/node_modules/@example/utils/index.js"
+  }
+}
