@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"strings"
 )
 
@@ -50,6 +51,12 @@ func (im *ImportMap) Validate() []*ValidationError {
 	var errs []*ValidationError
 	errs = append(errs, validateSpecifierMap(im.Imports, "")...)
 	for scope, imports := range im.Scopes {
+		if !isValidSpecifierValue(scope) {
+			errs = append(errs, &ValidationError{
+				Key:     scope,
+				Message: "scope key must be a valid URL or start with /, ./, or ../",
+			})
+		}
 		errs = append(errs, validateSpecifierMap(imports, scope)...)
 	}
 	return errs
@@ -86,12 +93,17 @@ func isValidSpecifierValue(value string) bool {
 	}
 	if strings.HasPrefix(value, "/") ||
 		strings.HasPrefix(value, "./") ||
-		strings.HasPrefix(value, "../") ||
-		strings.HasPrefix(value, "https://") ||
-		strings.HasPrefix(value, "http://") {
+		strings.HasPrefix(value, "../") {
 		return true
 	}
-	return false
+	u, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "" {
+		return false
+	}
+	return u.Opaque != "" || u.Host != "" || strings.HasPrefix(u.Path, "/")
 }
 
 // ImportMap represents an ES module import map.
@@ -282,21 +294,24 @@ func simplifyImports(imports map[string]string) map[string]string {
 		return result
 	}
 
-	// Filter out entries covered by trailing-slash keys
+	// Filter out entries whose target matches the trailing-slash expansion.
+	// An explicit entry like "lit/foo": "/custom/override.js" is kept when
+	// its target differs from what "lit/" would resolve to.
 	result := make(map[string]string)
 	for key, value := range imports {
-		// Keep trailing-slash keys themselves
 		if strings.HasSuffix(key, "/") {
 			result[key] = value
 			continue
 		}
 
-		// Check if this key is covered by any trailing-slash key
 		covered := false
 		for tsKey := range trailingSlashKeys {
-			prefix := strings.TrimSuffix(tsKey, "/")
-			if strings.HasPrefix(key, prefix+"/") {
-				covered = true
+			if strings.HasPrefix(key, tsKey) {
+				relPath := key[len(tsKey):]
+				baseTarget := imports[tsKey]
+				if baseTarget+relPath == value {
+					covered = true
+				}
 				break
 			}
 		}

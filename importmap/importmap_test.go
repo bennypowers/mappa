@@ -306,20 +306,29 @@ func TestValidate(t *testing.T) {
 		}
 	})
 
-	t.Run("scope validation", func(t *testing.T) {
-		im := &importmap.ImportMap{
-			Scopes: map[string]map[string]string{
-				"/node_modules/lit/": {
-					"@lit/reactive-element/": "/node_modules/@lit/reactive-element",
-				},
-			},
+	t.Run("scope entry validation", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "importmap/validate-scope-entries", "/test")
+		input, err := mfs.ReadFile("/test/input.json")
+		if err != nil {
+			t.Fatalf("Failed to read input.json: %v", err)
+		}
+		im, err := importmap.Parse(input)
+		if err != nil {
+			t.Fatalf("Parse failed: %v", err)
 		}
 		errs := im.Validate()
 		if len(errs) == 0 {
 			t.Fatal("Expected validation error for scope trailing-slash mismatch")
 		}
-		if errs[0].Scope != "/node_modules/lit/" {
-			t.Errorf("Expected scope in error, got %q", errs[0].Scope)
+		foundScopeError := false
+		for _, e := range errs {
+			if e.Scope == "/node_modules/lit/" {
+				foundScopeError = true
+				break
+			}
+		}
+		if !foundScopeError {
+			t.Error("Expected error within /node_modules/lit/ scope")
 		}
 	})
 }

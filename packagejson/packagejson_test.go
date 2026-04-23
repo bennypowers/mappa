@@ -480,6 +480,7 @@ func TestResolveExportNullTarget(t *testing.T) {
 	var expected struct {
 		Exports map[string]string `json:"exports"`
 		Blocked []string          `json:"blocked"`
+		Allowed []string          `json:"allowed"`
 	}
 	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
 		t.Fatalf("Failed to parse expected.json: %v", err)
@@ -507,11 +508,18 @@ func TestResolveExportNullTarget(t *testing.T) {
 	}
 
 	entries := pkg.ExportEntries(nil)
+	entrySubpaths := make(map[string]bool)
 	for _, e := range entries {
+		entrySubpaths[e.Subpath] = true
 		for _, blocked := range expected.Blocked {
 			if e.Subpath == blocked {
 				t.Errorf("ExportEntries should not include blocked subpath %q", blocked)
 			}
+		}
+	}
+	for _, allowed := range expected.Allowed {
+		if !entrySubpaths[allowed] {
+			t.Errorf("ExportEntries should include allowed subpath %q", allowed)
 		}
 	}
 }

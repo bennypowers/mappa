@@ -22,18 +22,16 @@ import (
 
 	"bennypowers.dev/mappa/importmap"
 	"bennypowers.dev/mappa/internal/mapfs"
+	"bennypowers.dev/mappa/testutil"
 	"bennypowers.dev/mappa/trace"
 )
 
 func TestBuildNewContent_InsertNew(t *testing.T) {
-	html := []byte(`<!DOCTYPE html>
-<html>
-<head>
-  <title>Test</title>
-  <script type="module" src="./app.js"></script>
-</head>
-<body></body>
-</html>`)
+	mfs := testutil.NewFixtureFS(t, "inject/build-insert-new", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
 
 	im := &importmap.ImportMap{
 		Imports: map[string]string{
@@ -61,19 +59,11 @@ func TestBuildNewContent_InsertNew(t *testing.T) {
 }
 
 func TestBuildNewContent_ReplaceExisting(t *testing.T) {
-	html := []byte(`<!DOCTYPE html>
-<html>
-<head>
-  <script type="importmap">
-{
-  "imports": {
-    "old": "/old.js"
-  }
-}
-  </script>
-</head>
-<body></body>
-</html>`)
+	mfs := testutil.NewFixtureFS(t, "inject/build-replace-existing", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
 
 	im := &importmap.ImportMap{
 		Imports: map[string]string{
@@ -102,17 +92,18 @@ func TestBuildNewContent_ReplaceExisting(t *testing.T) {
 }
 
 func TestBuildNewContent_NoHead(t *testing.T) {
-	html := []byte(`<!DOCTYPE html>
-<html>
-<body></body>
-</html>`)
+	mfs := testutil.NewFixtureFS(t, "inject/build-no-head", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
 
 	im := &importmap.ImportMap{
 		Imports: map[string]string{"lit": "/lit.js"},
 	}
 
 	loc := trace.FindImportMapTag(html)
-	_, _, err := buildNewContent(html, loc, im)
+	_, _, err = buildNewContent(html, loc, im)
 	if err == nil {
 		t.Error("Expected error when no <head> tag exists")
 	}
@@ -164,8 +155,7 @@ func TestExtractIndent(t *testing.T) {
 func TestIndentLines(t *testing.T) {
 	input := "{\n  \"imports\": {}\n}"
 	result := indentLines(input, "    ")
-	lines := strings.Split(result, "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(result, "\n") {
 		if line == "" {
 			continue
 		}
@@ -218,10 +208,15 @@ func TestInjectBatch_InvalidTemplate(t *testing.T) {
 		Template: "/assets/{bogus_var}/{path}",
 	})
 
+	var count int
 	for r := range results {
+		count++
 		if r.Error == "" {
 			t.Error("Expected error for invalid template variable")
 		}
+	}
+	if count == 0 {
+		t.Fatal("Expected at least one result from InjectBatch")
 	}
 }
 
@@ -230,13 +225,18 @@ func TestInjectBatch_MissingFile(t *testing.T) {
 
 	results := InjectBatch(mfs, []string{"/project/missing.html"}, "/project", Options{})
 
+	var count int
 	for r := range results {
+		count++
 		if r.Error == "" {
 			t.Error("Expected error for missing file")
 		}
 		if r.File != "/project/missing.html" {
 			t.Errorf("Expected file path in result, got %s", r.File)
 		}
+	}
+	if count == 0 {
+		t.Fatal("Expected at least one result from InjectBatch")
 	}
 }
 

@@ -3,5 +3,6 @@
     ".": "index.js",
     "./public": "public.js"
   },
-  "blocked": ["./internal"]
+  "blocked": ["./internal"],
+  "allowed": [".", "./public"]
 }
