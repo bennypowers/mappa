@@ -243,23 +243,14 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 			continue
 		}
 
-		// Check for wildcard exports and create trailing-slash keys for each
-		wildcards := pkg.WildcardExports(opts)
-		trailingSlashPrefixes := make(map[string]bool) // track which prefixes have trailing-slash keys
-
-		// Add trailing-slash keys for each wildcard pattern
-		for _, w := range wildcards {
-			// Pattern like "./*" or "./lib/*" -> key like "pkg/" or "pkg/lib/"
-			patternPrefix := strings.TrimSuffix(strings.TrimPrefix(w.Pattern, "./"), "*")
-			importKey := pkgName + "/" + patternPrefix
-			result[importKey] = r.template.Expand(pkgName, "", w.Target)
-			trailingSlashPrefixes[importKey] = true
-		}
-
-		// For packages with no exports, add trailing-slash key
-		if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
-			result[pkgName+"/"] = r.template.Expand(pkgName, "", "")
-			trailingSlashPrefixes[pkgName+"/"] = true
+		// Add trailing-slash keys from ImportMapEntries
+		trailingSlashPrefixes := make(map[string]bool)
+		for _, e := range pkg.ImportMapEntries(opts) {
+			if strings.HasSuffix(e.Key, "/") {
+				importKey := pkgName + e.Key
+				result[importKey] = r.template.Expand(pkgName, "", e.Path)
+				trailingSlashPrefixes[importKey] = true
+			}
 		}
 
 		// Add entries for each specifier
@@ -715,9 +706,13 @@ func (r *Resolver) processPackageDependenciesParallelWithGraph(
 			scopeEntries[depName+e.Key] = url
 		}
 
-		// Recursively process from the resolved location so nested copies
-		// use their own node_modules when resolving further transitive deps.
-		r.processPackageDependenciesParallelWithGraph(im, mu, visited, nodeModulesPath, depName, rootDir, graph)
+		// Recursively process. For nested copies, use the nested dep's
+		// parent directory so its own transitive deps are found correctly.
+		depNodeModules := nodeModulesPath
+		if isNested {
+			depNodeModules = filepath.Join(pkgPath, "node_modules")
+		}
+		r.processPackageDependenciesParallelWithGraph(im, mu, visited, depNodeModules, depName, rootDir, graph)
 	}
 
 	// Simplify scope entries (remove entries covered by trailing-slash keys)
