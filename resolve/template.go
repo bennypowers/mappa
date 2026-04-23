@@ -104,9 +104,8 @@ func (t *Template) HasVersion() bool {
 // For "name" returns ("name", "").
 func SplitPackageName(pkg string) (name, scope string) {
 	if strings.HasPrefix(pkg, "@") {
-		parts := strings.SplitN(pkg, "/", 2)
-		if len(parts) == 2 {
-			return parts[1], strings.TrimPrefix(parts[0], "@")
+		if scope, name, ok := strings.Cut(pkg, "/"); ok {
+			return name, strings.TrimPrefix(scope, "@")
 		}
 		return pkg, ""
 	}
@@ -118,16 +117,16 @@ func SplitPackageName(pkg string) (name, scope string) {
 // For "@scope/pkg/subpath" returns "@scope/pkg".
 func PackageName(specifier string) string {
 	if strings.HasPrefix(specifier, "@") {
-		parts := strings.SplitN(specifier, "/", 3)
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
+		// @scope/name or @scope/name/subpath -> @scope/name
+		scope, rest, ok := strings.Cut(specifier, "/")
+		if !ok {
+			return specifier
 		}
-		return specifier
+		name, _, _ := strings.Cut(rest, "/")
+		return scope + "/" + name
 	}
-	if idx := strings.Index(specifier, "/"); idx > 0 {
-		return specifier[:idx]
-	}
-	return specifier
+	name, _, _ := strings.Cut(specifier, "/")
+	return name
 }
 
 // DefaultLocalTemplate is the default template for local resolution.
