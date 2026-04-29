@@ -254,7 +254,7 @@ Returns the WASM engine version string.
 ```typescript
 import { resolve } from '@pwrs/mappa';
 
-export default function(eleventyConfig) {
+export default async function(eleventyConfig) {
   const importMap = await resolve('.', {
     template: '/assets/packages/{package}/{path}',
   });

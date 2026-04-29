@@ -19,7 +19,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "postinstall": "node dist/postinstall.js",
+    "postinstall": "[ -f dist/postinstall.js ] && node dist/postinstall.js || true",
     "test": "node --experimental-strip-types --test test/mappa.test.ts"
   },
   "optionalDependencies": {

@@ -65,7 +65,7 @@ describe("resolve", () => {
     assert.equal(im.imports, undefined);
   });
 
-  it("applies optimize=0 to skip simplification", async () => {
+  it("accepts both optimize levels without error", async () => {
     const optimized = await resolve(fixtureDir("resolve", "simple-pkg"), {
       optimize: 1,
     });
@@ -74,5 +74,7 @@ describe("resolve", () => {
     });
     assert.ok(optimized.imports);
     assert.ok(unoptimized.imports);
+    assert.equal(typeof optimized.imports["lit"], "string");
+    assert.equal(typeof unoptimized.imports["lit"], "string");
   });
 });

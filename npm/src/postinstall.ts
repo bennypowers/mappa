@@ -20,7 +20,7 @@ if (!pkg) {
   process.exit(1);
 }
 
-const result = spawnSync("npm", ["install", "--no-save", pkg], { stdio: "inherit" });
+const result = spawnSync("npm", ["install", "--no-save", pkg], { stdio: "inherit", shell: true });
 if (result.status !== 0) {
   console.error(`Failed to install platform binary package: ${pkg}`);
   process.exit(1);

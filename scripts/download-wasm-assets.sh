@@ -7,15 +7,29 @@ set -euo pipefail
 
 RELEASE_TAG="${1:?Usage: download-wasm-assets.sh <release-tag>}"
 REPO="${GITHUB_REPOSITORY:-bennypowers/mappa}"
+MAX_RETRIES=5
 
 mkdir -p dist
 
 for asset in mappa.wasm wasm_exec.js; do
-  echo "Downloading $asset from release $RELEASE_TAG..."
-  curl -fsSL \
-    -H "Accept: application/octet-stream" \
-    "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}" \
-    -o "dist/${asset}"
+  attempt=0
+  while true; do
+    attempt=$((attempt + 1))
+    echo "Downloading $asset (attempt $attempt/$MAX_RETRIES)..."
+    if curl -fsSL \
+      -H "Accept: application/octet-stream" \
+      "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}" \
+      -o "dist/${asset}"; then
+      break
+    fi
+    if [ "$attempt" -ge "$MAX_RETRIES" ]; then
+      echo "Failed to download $asset after $MAX_RETRIES attempts"
+      exit 1
+    fi
+    delay=$((1 << (attempt - 1)))
+    echo "Retrying in ${delay}s..."
+    sleep "$delay"
+  done
 done
 
 echo "Downloaded WASM assets to dist/"
