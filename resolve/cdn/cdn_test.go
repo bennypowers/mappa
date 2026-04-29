@@ -19,6 +19,7 @@ package cdn
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
@@ -302,7 +303,7 @@ func TestResolverWithExclude(t *testing.T) {
 			t.Error("Expected lib-a in imports")
 		}
 		for k := range im.Imports {
-			if k == "lib-b" || k == "lib-b/helpers" {
+			if k == "lib-b" || strings.HasPrefix(k, "lib-b/") {
 				t.Errorf("Expected lib-b excluded from imports, found key %q", k)
 			}
 		}
@@ -324,14 +325,14 @@ func TestResolverWithExclude(t *testing.T) {
 		}
 		// lib-b should not appear in imports
 		for k := range im.Imports {
-			if k == "lib-b" || k == "lib-b/helpers" {
+			if k == "lib-b" || strings.HasPrefix(k, "lib-b/") {
 				t.Errorf("Expected lib-b excluded from imports, found key %q", k)
 			}
 		}
 		// lib-b should not appear in any scope
 		for scopeKey, scope := range im.Scopes {
 			for k := range scope {
-				if k == "lib-b" || k == "lib-b/helpers" {
+				if k == "lib-b" || strings.HasPrefix(k, "lib-b/") {
 					t.Errorf("Expected lib-b excluded from scope %q, found key %q", scopeKey, k)
 				}
 			}

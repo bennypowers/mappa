@@ -100,7 +100,7 @@ func (c *PackageCache) Set(pkgName, version string, pkg *packagejson.PackageJSON
 	}
 
 	// Evict oldest if at capacity
-	if len(c.entries) >= c.maxSize {
+	if len(c.entries) == c.maxSize {
 		oldest := c.order[0]
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
@@ -135,16 +135,16 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 		return entry.pkg, entry.err
 	}
 
-	// Create new entry with loader
-	entry = &cacheEntry{loader: loader}
-	c.entries[key] = entry
-
 	// Evict oldest if at capacity
-	if len(c.entries) >= c.maxSize {
+	if len(c.entries) == c.maxSize {
 		oldest := c.order[0]
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
 	}
+
+	// Create new entry with loader
+	entry = &cacheEntry{loader: loader}
+	c.entries[key] = entry
 	c.order = append(c.order, key)
 	c.mu.Unlock()
 
