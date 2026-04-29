@@ -17,3 +17,43 @@ jobs:
     with:
       binary-name: mappa
       release-tag: ${{ github.event.release.tag_name || inputs.release-tag }}
+
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build WASM release binary
+        run: make wasm-release
+
+      - name: Upload WASM assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release-tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            web/mappa.wasm \
+            web/wasm_exec.js \
+            --clobber
+
+  npm:
+    needs: [build, build-wasm]
+    uses: bennypowers/go-release-workflows/.github/workflows/npm-publish.yml@main
+    with:
+      binary-name: mappa
+      npm-package-name: "@pwrs/mappa"
+      release-tag: ${{ github.event.release.tag_name || inputs.release-tag }}
+      pre-main-publish-script: |
+        npm install && \
+        npx tsc && \
+        cp ../README.md ../LICENSE . && \
+        node --experimental-strip-types ../scripts/update-platform-package-versions.ts && \
+        bash ../scripts/download-wasm-assets.sh "$RELEASE_TAG"
+    secrets:
+      npm-token: ${{ secrets.NPM_TOKEN }}

@@ -23,6 +23,22 @@ Mappa generates import maps from your `package.json` dependencies, pointing to y
 
 ## Installation
 
+### npm
+
+```bash
+npm install @pwrs/mappa
+```
+
+Provides both a CLI (`npx mappa generate`) and a JavaScript API:
+
+```typescript
+import { resolve } from '@pwrs/mappa';
+
+const importMap = await resolve('.', {
+  template: '/assets/packages/{package}/{path}',
+});
+```
+
 ### Gentoo Linux
 
 Enable the `bennypowers` overlay, then install:
@@ -177,21 +193,72 @@ Mappa is written in Go for speed. Benchmarked against [@jspm/generator][jspm] on
 [jspm]: https://jspm.org/
 [rhds]: https://github.com/RedHat-UX/red-hat-design-system
 
+## JavaScript API
+
+The npm package includes a WASM-powered JavaScript API alongside the CLI.
+
+### `resolve(rootDir, options?)`
+
+Generate an import map from a local directory's `node_modules`:
+
+```typescript
+import { resolve } from '@pwrs/mappa';
+
+const importMap = await resolve('.', {
+  template: '/assets/packages/{package}/{path}',
+  conditions: ['browser', 'import', 'default'],
+  exclude: ['lodash'],
+});
+```
+
+**Options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `template` | `string` | URL template (default: `/node_modules/{package}/{path}`) |
+| `conditions` | `string[]` | Export condition priority |
+| `includePackages` | `string[]` | Additional packages beyond dependencies |
+| `exclude` | `string[]` | Packages to exclude |
+| `inputMap` | `ImportMap` | Import map to merge (takes precedence) |
+| `optimize` | `0 \| 1` | 0=none, 1=simplify+dedup (default: 1) |
+
+### `generate(packageJson, options?)`
+
+Generate an import map from package.json contents using a CDN:
+
+```typescript
+import { generate } from '@pwrs/mappa';
+
+const importMap = await generate(
+  { dependencies: { lit: '^3.0.0' } },
+  { cdn: 'esm.sh' }
+);
+```
+
+**Options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `cdn` | `"esm.sh" \| "unpkg" \| "jsdelivr"` | CDN provider |
+| `template` | `string` | Custom CDN URL template |
+| `conditions` | `string[]` | Export conditions |
+
+### `version()`
+
+Returns the WASM engine version string.
+
 ## Integration Examples
 
 ### 11ty / Eleventy
 
 ```typescript
-import { execSync } from 'node:child_process';
+import { resolve } from '@pwrs/mappa';
 
-export default function(eleventyConfig) {
-  const result = execSync('mappa generate --template "/assets/packages/{package}/{path}"', {
-    encoding: 'utf-8',
+export default async function(eleventyConfig) {
+  const importMap = await resolve('.', {
+    template: '/assets/packages/{package}/{path}',
   });
 
-  const importMap = JSON.parse(result);
-
-  // Set up passthrough copies for each package
   for (const [, path] of Object.entries(importMap.imports)) {
     const match = path.match(/^\/assets\/packages\/(@[^/]+\/[^/]+|[^/]+)/);
     if (match) {
@@ -201,7 +268,6 @@ export default function(eleventyConfig) {
     }
   }
 
-  // Inject import map into HTML
   eleventyConfig.addTransform('importmap', (content, outputPath) => {
     if (!outputPath?.endsWith('.html')) return content;
 

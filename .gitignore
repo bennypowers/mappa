@@ -8,9 +8,15 @@ mappa_test
 *.so
 *.dylib
 
-# WASM build artifacts in web/
+# WASM build artifacts
 web/wasm_exec.js
 web/mappa.wasm
+
+# npm build output and CI artifacts
+npm/dist/
+npm/node_modules/
+npm/README.md
+npm/LICENSE
 
 # Test binary, built with `go test -c`
 *.test
