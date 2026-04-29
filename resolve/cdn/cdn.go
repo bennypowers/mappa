@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
 	"bennypowers.dev/mappa/importmap"
@@ -42,8 +43,10 @@ type Resolver struct {
 	conditions   []string
 	includeDev   bool
 	excludePackages []string
-	maxDepth        int  // Maximum dependency depth (0 = unlimited)
-	resolveScope    bool // Whether to resolve transitive dependencies as scopes
+	maxDepth        int           // Maximum dependency depth (0 = unlimited)
+	resolveScope    bool          // Whether to resolve transitive dependencies as scopes
+	requestTimeout  time.Duration // Per-request timeout (0 = no timeout)
+	concurrency     int           // Max concurrent goroutines across all depths
 }
 
 // New creates a new CDN resolver with default settings.
@@ -56,25 +59,17 @@ func New(fetcher mappacdn.Fetcher) *Resolver {
 		template:     tmpl,
 		cache:        mappacdn.NewPackageCache(100),
 		resolveScope: true,
+		concurrency:  10,
 	}
 }
 
 // WithProvider returns a new Resolver using the specified CDN provider.
 func (r *Resolver) WithProvider(provider mappacdn.Provider) *Resolver {
 	tmpl, _ := resolve.ParseTemplate(provider.ModuleTemplate)
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        provider,
-		registry:        r.registry,
-		template:        tmpl,
-		cache:           r.cache,
-		logger:          r.logger,
-		conditions:      r.conditions,
-		includeDev:      r.includeDev,
-		excludePackages: r.excludePackages,
-		maxDepth:        r.maxDepth,
-		resolveScope:    r.resolveScope,
-	}
+	c := r.clone()
+	c.provider = provider
+	c.template = tmpl
+	return c
 }
 
 // WithTemplate returns a new Resolver using a custom URL template.
@@ -83,110 +78,74 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        r.provider,
-		registry:        r.registry,
-		template:        tmpl,
-		cache:           r.cache,
-		logger:          r.logger,
-		conditions:      r.conditions,
-		includeDev:      r.includeDev,
-		excludePackages: r.excludePackages,
-		maxDepth:        r.maxDepth,
-		resolveScope:    r.resolveScope,
-	}, nil
+	c := r.clone()
+	c.template = tmpl
+	return c, nil
 }
 
 // WithLogger returns a new Resolver with the specified logger.
 func (r *Resolver) WithLogger(logger resolve.Logger) *Resolver {
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        r.provider,
-		registry:        r.registry,
-		template:        r.template,
-		cache:           r.cache,
-		logger:          logger,
-		conditions:      r.conditions,
-		includeDev:      r.includeDev,
-		excludePackages: r.excludePackages,
-		maxDepth:        r.maxDepth,
-		resolveScope:    r.resolveScope,
-	}
+	c := r.clone()
+	c.logger = logger
+	return c
 }
 
 // WithConditions returns a new Resolver with the specified export conditions.
 func (r *Resolver) WithConditions(conditions []string) *Resolver {
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        r.provider,
-		registry:        r.registry,
-		template:        r.template,
-		cache:           r.cache,
-		logger:          r.logger,
-		conditions:      conditions,
-		includeDev:      r.includeDev,
-		excludePackages: r.excludePackages,
-		maxDepth:        r.maxDepth,
-		resolveScope:    r.resolveScope,
-	}
+	c := r.clone()
+	c.conditions = conditions
+	return c
 }
 
 // WithIncludeDev returns a new Resolver that includes devDependencies.
 func (r *Resolver) WithIncludeDev(include bool) *Resolver {
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        r.provider,
-		registry:        r.registry,
-		template:        r.template,
-		cache:           r.cache,
-		logger:          r.logger,
-		conditions:      r.conditions,
-		includeDev:      include,
-		excludePackages: r.excludePackages,
-		maxDepth:        r.maxDepth,
-		resolveScope:    r.resolveScope,
-	}
+	c := r.clone()
+	c.includeDev = include
+	return c
 }
 
 // WithMaxDepth returns a new Resolver with a maximum dependency depth.
 // 0 means unlimited (default), 1 means direct dependencies only.
 func (r *Resolver) WithMaxDepth(depth int) *Resolver {
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        r.provider,
-		registry:        r.registry,
-		template:        r.template,
-		cache:           r.cache,
-		logger:          r.logger,
-		conditions:      r.conditions,
-		includeDev:      r.includeDev,
-		excludePackages: r.excludePackages,
-		maxDepth:        depth,
-		resolveScope:    r.resolveScope,
-	}
+	c := r.clone()
+	c.maxDepth = depth
+	return c
 }
 
 // WithResolveScope controls whether to generate scopes for transitive dependencies.
 func (r *Resolver) WithResolveScope(resolveScope bool) *Resolver {
-	return &Resolver{
-		fetcher:         r.fetcher,
-		provider:        r.provider,
-		registry:        r.registry,
-		template:        r.template,
-		cache:           r.cache,
-		logger:          r.logger,
-		conditions:      r.conditions,
-		includeDev:      r.includeDev,
-		excludePackages: r.excludePackages,
-		maxDepth:        r.maxDepth,
-		resolveScope:    resolveScope,
-	}
+	c := r.clone()
+	c.resolveScope = resolveScope
+	return c
 }
 
 // WithExclude returns a new Resolver that excludes the specified packages
 // from the generated import map, including as transitive dependencies.
 func (r *Resolver) WithExclude(packages []string) *Resolver {
+	c := r.clone()
+	c.excludePackages = packages
+	return c
+}
+
+// WithRequestTimeout returns a new Resolver with a per-request timeout.
+// 0 means no timeout (default). Applied to each HTTP fetch and registry call.
+func (r *Resolver) WithRequestTimeout(d time.Duration) *Resolver {
+	c := r.clone()
+	c.requestTimeout = d
+	return c
+}
+
+// WithConcurrency returns a new Resolver with the specified max concurrent goroutines.
+// Shared across all recursion depths to prevent unbounded fan-out.
+func (r *Resolver) WithConcurrency(n int) *Resolver {
+	c := r.clone()
+	if n > 0 {
+		c.concurrency = n
+	}
+	return c
+}
+
+func (r *Resolver) clone() *Resolver {
 	return &Resolver{
 		fetcher:         r.fetcher,
 		provider:        r.provider,
@@ -194,11 +153,13 @@ func (r *Resolver) WithExclude(packages []string) *Resolver {
 		template:        r.template,
 		cache:           r.cache,
 		logger:          r.logger,
-		conditions:      r.conditions,
+		conditions:      slices.Clone(r.conditions),
 		includeDev:      r.includeDev,
-		excludePackages: packages,
+		excludePackages: slices.Clone(r.excludePackages),
 		maxDepth:        r.maxDepth,
 		resolveScope:    r.resolveScope,
+		requestTimeout:  r.requestTimeout,
+		concurrency:     r.concurrency,
 	}
 }
 
@@ -237,17 +198,14 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 	// Resolve each dependency
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	sem := make(chan struct{}, 10) // Limit concurrency
+	sem := make(chan struct{}, r.concurrency)
 	visited := sync.Map{}
 
 	for name, versionRange := range deps {
 		wg.Add(1)
 		go func(pkgName, verRange string) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			if err := r.resolvePackage(ctx, result, &mu, &visited, pkgName, verRange, 0); err != nil {
+			if err := r.resolvePackage(ctx, result, &mu, &visited, sem, pkgName, verRange, 0); err != nil {
 				if r.logger != nil {
 					r.logger.Warning("Failed to resolve %s@%s: %v", pkgName, verRange, err)
 				}
@@ -265,41 +223,47 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 }
 
 // resolvePackage resolves a single package and its dependencies.
+// sem is shared across all recursion depths to bound total concurrency.
+// Acquires sem only for HTTP work, releases before spawning children
+// to prevent deadlock when parents hold slots while waiting on children.
 func (r *Resolver) resolvePackage(
 	ctx context.Context,
 	im *importmap.ImportMap,
 	mu *sync.Mutex,
 	visited *sync.Map,
+	sem chan struct{},
 	pkgName, versionRange string,
 	depth int,
 ) error {
-	// Check max depth
 	if r.maxDepth > 0 && depth >= r.maxDepth {
 		return nil
 	}
 
-	// Resolve version
-	version, err := r.registry.ResolveVersion(ctx, pkgName, versionRange)
-	if err != nil {
+	if err := r.acquireSem(ctx, sem); err != nil {
 		return err
 	}
 
-	// Check if already visited at this or higher version
+	version, err := r.resolveVersion(ctx, pkgName, versionRange)
+	if err != nil {
+		<-sem
+		return err
+	}
+
 	cacheKey := pkgName + "@" + version
 	if _, loaded := visited.LoadOrStore(cacheKey, true); loaded {
+		<-sem
 		return nil
 	}
 
-	// Fetch package.json from CDN
 	pkg, err := r.fetchPackageJSON(ctx, pkgName, version)
+	// Release sem -- HTTP work done, recursive work doesn't need it
+	<-sem
 	if err != nil {
 		return err
 	}
 
-	// Add to imports
 	r.addPackageImports(im, mu, pkgName, version, pkg)
 
-	// Resolve transitive dependencies if enabled
 	if r.resolveScope && (r.maxDepth == 0 || depth < r.maxDepth) && len(pkg.Dependencies) > 0 {
 		scopeKey := r.template.Expand(pkgName, version, "")
 		if !strings.HasSuffix(scopeKey, "/") {
@@ -309,7 +273,6 @@ func (r *Resolver) resolvePackage(
 		scopeEntries := make(map[string]string)
 		var wg sync.WaitGroup
 		var scopeMu sync.Mutex
-		sem := make(chan struct{}, 10)
 
 		for depName, depVer := range pkg.Dependencies {
 			if slices.Contains(r.excludePackages, depName) {
@@ -318,20 +281,22 @@ func (r *Resolver) resolvePackage(
 			wg.Add(1)
 			go func(name, ver string) {
 				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
 
-				// Resolve transitive dependency version
-				resolvedVer, err := r.registry.ResolveVersion(ctx, name, ver)
+				if err := r.acquireSem(ctx, sem); err != nil {
+					return
+				}
+
+				resolvedVer, err := r.resolveVersion(ctx, name, ver)
 				if err != nil {
+					<-sem
 					if r.logger != nil {
 						r.logger.Warning("Failed to resolve transitive dep %s@%s: %v", name, ver, err)
 					}
 					return
 				}
 
-				// Fetch package.json
 				depPkg, err := r.fetchPackageJSON(ctx, name, resolvedVer)
+				<-sem
 				if err != nil {
 					if r.logger != nil {
 						r.logger.Warning("Failed to fetch %s@%s: %v", name, resolvedVer, err)
@@ -339,14 +304,12 @@ func (r *Resolver) resolvePackage(
 					return
 				}
 
-				// Build scope entries
 				entries := r.buildPackageImports(name, resolvedVer, depPkg)
 				scopeMu.Lock()
 				maps.Copy(scopeEntries, entries)
 				scopeMu.Unlock()
 
-				// Recursively resolve deeper dependencies using resolved version
-				if err := r.resolvePackage(ctx, im, mu, visited, name, resolvedVer, depth+1); err != nil {
+				if err := r.resolvePackage(ctx, im, mu, visited, sem, name, resolvedVer, depth+1); err != nil {
 					if r.logger != nil {
 						r.logger.Warning("Failed to resolve transitive dep %s: %v", name, err)
 					}
@@ -371,16 +334,44 @@ func (r *Resolver) resolvePackage(
 	return nil
 }
 
+// acquireSem blocks until a semaphore slot is available or the context is cancelled.
+func (r *Resolver) acquireSem(ctx context.Context, sem chan struct{}) error {
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// resolveVersion wraps registry.ResolveVersion with an optional per-request timeout.
+func (r *Resolver) resolveVersion(ctx context.Context, pkgName, versionRange string) (string, error) {
+	reqCtx, cancel := r.withTimeout(ctx)
+	defer cancel()
+	return r.registry.ResolveVersion(reqCtx, pkgName, versionRange)
+}
+
 // fetchPackageJSON fetches and parses a package.json from the CDN.
 func (r *Resolver) fetchPackageJSON(ctx context.Context, pkgName, version string) (*packagejson.PackageJSON, error) {
 	return r.cache.GetOrLoad(pkgName, version, func() (*packagejson.PackageJSON, error) {
 		url := r.buildPackageJSONURL(pkgName, version)
-		data, err := r.fetcher.Fetch(ctx, url)
+		reqCtx, cancel := r.withTimeout(ctx)
+		defer cancel()
+		data, err := r.fetcher.Fetch(reqCtx, url)
 		if err != nil {
 			return nil, err
 		}
 		return packagejson.Parse(data)
 	})
+}
+
+// withTimeout derives a context with the configured request timeout.
+// Returns the original context and a no-op cancel if no timeout is set.
+func (r *Resolver) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.requestTimeout > 0 {
+		return context.WithTimeout(ctx, r.requestTimeout)
+	}
+	return ctx, func() {}
 }
 
 // buildPackageJSONURL builds the URL for a package.json file.

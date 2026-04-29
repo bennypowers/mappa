@@ -1,0 +1,1 @@
+{"name":"deep-a","version":"1.0.0","exports":{".":"./index.js"},"dependencies":{"subdep-a1":"^1.0.0"}}
