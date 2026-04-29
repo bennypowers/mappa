@@ -7,7 +7,6 @@ await import('./wasm_exec.js');
 const packageJsonInput = document.getElementById('package-json');
 const cdnSelect = document.getElementById('cdn-select');
 const conditionsInput = document.getElementById('conditions');
-const includeDevCheckbox = document.getElementById('include-dev');
 const generateBtn = document.getElementById('generate-btn');
 const copyBtn = document.getElementById('copy-btn');
 const outputPre = document.getElementById('output');
@@ -86,7 +85,6 @@ async function generateImportMap() {
         const options = {
             cdn: cdnSelect.value,
             conditions: parseConditions(conditionsInput.value),
-            includeDev: includeDevCheckbox.checked
         };
 
         const result = await globalThis.mappa.generate(packageJsonStr, options);

@@ -92,10 +92,6 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid format %q: must be 'json' or 'html'", format)
 	}
 
-	// Get additional packages and exclusions
-	includePackages := viper.GetStringSlice("include-package")
-	excludePackages := viper.GetStringSlice("exclude")
-
 	// Parse input map if provided
 	var inputMap *importmap.ImportMap
 	if inputMapPath := viper.GetString("input-map"); inputMapPath != "" {
@@ -109,29 +105,22 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Get URL template (default to local node_modules)
 	templateArg := viper.GetString("template")
 	if templateArg == "" {
 		templateArg = resolve.DefaultLocalTemplate
 	}
 
-	// Build resolver
-	resolver := local.New(osfs, nil)
-	if len(includePackages) > 0 {
-		resolver = resolver.WithPackages(includePackages)
+	opts := &local.Options{
+		Template:        templateArg,
+		Conditions:      viper.GetStringSlice("conditions"),
+		IncludePackages: viper.GetStringSlice("include-package"),
+		Exclude:         viper.GetStringSlice("exclude"),
+		InputMap:        inputMap,
 	}
-	if len(excludePackages) > 0 {
-		resolver = resolver.WithExclude(excludePackages)
-	}
-	resolver, err = resolver.WithTemplate(templateArg)
+
+	resolver, err := opts.Apply(local.New(osfs, nil))
 	if err != nil {
-		return fmt.Errorf("invalid template: %w", err)
-	}
-	if inputMap != nil {
-		resolver = resolver.WithInputMap(inputMap)
-	}
-	if conditions := viper.GetStringSlice("conditions"); len(conditions) > 0 {
-		resolver = resolver.WithConditions(conditions)
+		return err
 	}
 
 	generatedMap, err := resolver.Resolve(absRoot)
