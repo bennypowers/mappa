@@ -1,0 +1,1 @@
+{"name":"root","version":"1.0.0","exports":{".":"./index.js"},"dependencies":{"dep-a":"^1.0.0","dep-b":"^1.0.0","dep-c":"^1.0.0"}}

@@ -20,7 +20,9 @@ package cdn
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
 	"bennypowers.dev/mappa/packagejson"
@@ -29,14 +31,19 @@ import (
 
 // MockFetcher is a test implementation of the Fetcher interface.
 type MockFetcher struct {
-	responses map[string][]byte
-	errors    map[string]error
+	responses    map[string][]byte
+	errors       map[string]error
+	delays       map[string]time.Duration
+	fetchCount   atomic.Int64
+	maxConcurrent atomic.Int64
+	inflight      atomic.Int64
 }
 
 func NewMockFetcher() *MockFetcher {
 	return &MockFetcher{
 		responses: make(map[string][]byte),
 		errors:    make(map[string]error),
+		delays:    make(map[string]time.Duration),
 	}
 }
 
@@ -48,7 +55,32 @@ func (m *MockFetcher) AddError(url string, err error) {
 	m.errors[url] = err
 }
 
+func (m *MockFetcher) AddDelay(url string, d time.Duration) {
+	m.delays[url] = d
+}
+
 func (m *MockFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	m.fetchCount.Add(1)
+	cur := m.inflight.Add(1)
+	defer m.inflight.Add(-1)
+	for {
+		old := m.maxConcurrent.Load()
+		if cur <= old || m.maxConcurrent.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+
+	if d, ok := m.delays[url]; ok {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return nil, &mappacdn.FetchError{URL: url, Message: ctx.Err().Error()}
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, &mappacdn.FetchError{URL: url, Message: err.Error()}
+	}
 	if err, ok := m.errors[url]; ok {
 		return nil, err
 	}
@@ -354,5 +386,196 @@ func TestBuildPackageImportsMainFallback(t *testing.T) {
 
 	if imports["legacy"] != "https://esm.sh/legacy@1.0.0/lib/main.js" {
 		t.Errorf("Unexpected main fallback: %s", imports["legacy"])
+	}
+}
+
+func TestSharedSemaphoreBoundsConcurrency(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+
+	rootRegistry := testutil.LoadFixtureFile(t, "root-registry/response.json")
+	rootPkg := testutil.LoadFixtureFile(t, "root-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/root", rootRegistry)
+	mockFetcher.AddResponse("https://esm.sh/root@1.0.0/package.json", rootPkg)
+
+	for _, name := range []string{"dep-a", "dep-b", "dep-c"} {
+		reg := testutil.LoadFixtureFile(t, name+"-registry/response.json")
+		pkg := testutil.LoadFixtureFile(t, name+"-package/package.json")
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name, reg)
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json", pkg)
+		mockFetcher.AddDelay("https://registry.npmjs.org/"+name, 10*time.Millisecond)
+		mockFetcher.AddDelay("https://esm.sh/"+name+"@1.0.0/package.json", 10*time.Millisecond)
+	}
+
+	resolver := New(mockFetcher).WithConcurrency(2)
+	ctx := context.Background()
+
+	pkg := &packagejson.PackageJSON{
+		Dependencies: map[string]string{"root": "^1.0.0"},
+	}
+
+	im, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+
+	if im.Imports["root"] == "" {
+		t.Error("Expected 'root' in imports")
+	}
+
+	if max := mockFetcher.maxConcurrent.Load(); max > 2 {
+		t.Errorf("Expected max concurrent <= 2, got %d", max)
+	}
+}
+
+func TestSharedSemaphoreNoDeadlockMultiDepth(t *testing.T) {
+	// Regression test: with per-level semaphores, concurrency=2 with 2 direct
+	// deps each having transitive deps would deadlock. Both parents hold slots
+	// while children wait for slots.
+	// Tree: deep-a -> subdep-a1, deep-b -> subdep-b1
+	mockFetcher := NewMockFetcher()
+
+	for _, name := range []string{"deep-a", "deep-b", "subdep-a1", "subdep-b1"} {
+		reg := testutil.LoadFixtureFile(t, name+"-registry/response.json")
+		pkg := testutil.LoadFixtureFile(t, name+"-package/package.json")
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name, reg)
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json", pkg)
+		mockFetcher.AddDelay("https://registry.npmjs.org/"+name, 5*time.Millisecond)
+		mockFetcher.AddDelay("https://esm.sh/"+name+"@1.0.0/package.json", 5*time.Millisecond)
+	}
+
+	resolver := New(mockFetcher).WithConcurrency(2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pkg := &packagejson.PackageJSON{
+		Dependencies: map[string]string{
+			"deep-a": "^1.0.0",
+			"deep-b": "^1.0.0",
+		},
+	}
+
+	im, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error (possible deadlock): %v", err)
+	}
+
+	if im.Imports["deep-a"] == "" {
+		t.Error("Expected 'deep-a' in imports")
+	}
+	if im.Imports["deep-b"] == "" {
+		t.Error("Expected 'deep-b' in imports")
+	}
+}
+
+func TestRequestTimeoutCancelsSlowFetch(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+
+	slowRegistry := testutil.LoadFixtureFile(t, "slow-pkg-registry/response.json")
+	slowPkg := testutil.LoadFixtureFile(t, "slow-pkg-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/slow-pkg", slowRegistry)
+	mockFetcher.AddResponse("https://esm.sh/slow-pkg@1.0.0/package.json", slowPkg)
+	mockFetcher.AddDelay("https://esm.sh/slow-pkg@1.0.0/package.json", 500*time.Millisecond)
+
+	resolver := New(mockFetcher).
+		WithRequestTimeout(50 * time.Millisecond).
+		WithMaxDepth(1)
+
+	ctx := context.Background()
+	pkg := &packagejson.PackageJSON{
+		Dependencies: map[string]string{"slow-pkg": "^1.0.0"},
+	}
+
+	im, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+
+	if im.Imports["slow-pkg"] != "" {
+		t.Error("Expected slow-pkg to be missing from imports due to timeout")
+	}
+}
+
+func TestRequestTimeoutDefaultIsNoTimeout(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+
+	litRegistry := testutil.LoadFixtureFile(t, "lit-registry/response.json")
+	litPackage := testutil.LoadFixtureFile(t, "lit-package/package.json")
+
+	mockFetcher.AddResponse("https://registry.npmjs.org/lit", litRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lit@3.0.0/package.json", litPackage)
+
+	resolver := New(mockFetcher).WithMaxDepth(1)
+	ctx := context.Background()
+
+	pkg := &packagejson.PackageJSON{
+		Dependencies: map[string]string{"lit": "^3.0.0"},
+	}
+
+	im, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+
+	if im.Imports["lit"] == "" {
+		t.Error("Expected 'lit' in imports")
+	}
+}
+
+func TestContextCancellationStopsSemAcquisition(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+
+	for _, name := range []string{"dep-a", "dep-b", "dep-c"} {
+		reg := testutil.LoadFixtureFile(t, name+"-registry/response.json")
+		pkg := testutil.LoadFixtureFile(t, name+"-package/package.json")
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name, reg)
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json", pkg)
+		mockFetcher.AddDelay("https://registry.npmjs.org/"+name, 100*time.Millisecond)
+	}
+
+	resolver := New(mockFetcher).WithConcurrency(1).WithMaxDepth(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	pkg := &packagejson.PackageJSON{
+		Dependencies: map[string]string{
+			"dep-a": "^1.0.0",
+			"dep-b": "^1.0.0",
+			"dep-c": "^1.0.0",
+		},
+	}
+
+	im, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+
+	// With concurrency=1 and 100ms delay per dep, 50ms timeout should prevent
+	// resolving all 3 deps
+	resolved := 0
+	for _, name := range []string{"dep-a", "dep-b", "dep-c"} {
+		if im.Imports[name] != "" {
+			resolved++
+		}
+	}
+	if resolved == 3 {
+		t.Error("Expected context cancellation to prevent resolving all deps")
+	}
+}
+
+func TestWithConcurrencyDefault(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	resolver := New(mockFetcher)
+	if resolver.concurrency != 10 {
+		t.Errorf("Expected default concurrency 10, got %d", resolver.concurrency)
+	}
+}
+
+func TestWithConcurrencyIgnoresZero(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	resolver := New(mockFetcher).WithConcurrency(0)
+	if resolver.concurrency != 10 {
+		t.Errorf("Expected concurrency to remain 10 for zero input, got %d", resolver.concurrency)
 	}
 }
