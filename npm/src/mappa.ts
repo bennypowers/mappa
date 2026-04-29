@@ -11,6 +11,8 @@ export interface GenerateOptions {
   template?: string;
   /** Export conditions to resolve */
   conditions?: string[];
+  /** Packages to exclude from the generated map, including as transitive dependencies */
+  exclude?: string[];
 }
 
 export interface ResolveOptions {

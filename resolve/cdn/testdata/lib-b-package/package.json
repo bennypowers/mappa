@@ -1,0 +1,8 @@
+{
+  "name": "lib-b",
+  "version": "1.0.0",
+  "exports": {
+    ".": {"import": "./index.js"},
+    "./helpers": {"import": "./helpers.js"}
+  }
+}

@@ -33,9 +33,19 @@ type PackageCache struct {
 }
 
 type cacheEntry struct {
-	pkg  *packagejson.PackageJSON
-	once sync.Once
-	err  error
+	pkg    *packagejson.PackageJSON
+	once   sync.Once
+	err    error
+	loader func() (*packagejson.PackageJSON, error)
+}
+
+func (e *cacheEntry) load() {
+	e.once.Do(func() {
+		if e.loader != nil {
+			e.pkg, e.err = e.loader()
+			e.loader = nil
+		}
+	})
 }
 
 // NewPackageCache creates a new package cache with the specified maximum size.
@@ -90,7 +100,7 @@ func (c *PackageCache) Set(pkgName, version string, pkg *packagejson.PackageJSON
 	}
 
 	// Evict oldest if at capacity
-	if len(c.entries) >= c.maxSize {
+	if len(c.entries) == c.maxSize {
 		oldest := c.order[0]
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
@@ -110,11 +120,9 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 	entry, ok := c.entries[key]
 	c.mu.RUnlock()
 
-	if ok && entry.pkg != nil {
-		return entry.pkg, nil
-	}
-	if ok && entry.err != nil {
-		return nil, entry.err
+	if ok {
+		entry.load()
+		return entry.pkg, entry.err
 	}
 
 	// Slow path: create entry and load
@@ -123,35 +131,25 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 	entry, ok = c.entries[key]
 	if ok {
 		c.mu.Unlock()
-		entry.once.Do(func() {})
-		if entry.err != nil {
-			return nil, entry.err
-		}
-		return entry.pkg, nil
+		entry.load()
+		return entry.pkg, entry.err
 	}
 
-	// Create new entry
-	entry = &cacheEntry{}
-	c.entries[key] = entry
-
 	// Evict oldest if at capacity
-	if len(c.entries) >= c.maxSize {
+	if len(c.entries) == c.maxSize {
 		oldest := c.order[0]
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
 	}
+
+	// Create new entry with loader
+	entry = &cacheEntry{loader: loader}
+	c.entries[key] = entry
 	c.order = append(c.order, key)
 	c.mu.Unlock()
 
-	// Load outside the lock
-	entry.once.Do(func() {
-		entry.pkg, entry.err = loader()
-	})
-
-	if entry.err != nil {
-		return nil, entry.err
-	}
-	return entry.pkg, nil
+	entry.load()
+	return entry.pkg, entry.err
 }
 
 // Invalidate removes a specific package from the cache.

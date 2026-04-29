@@ -21,6 +21,7 @@ package cdn
 import (
 	"context"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -40,8 +41,9 @@ type Resolver struct {
 	logger       resolve.Logger
 	conditions   []string
 	includeDev   bool
-	maxDepth     int  // Maximum dependency depth (0 = unlimited)
-	resolveScope bool // Whether to resolve transitive dependencies as scopes
+	excludePackages []string
+	maxDepth        int  // Maximum dependency depth (0 = unlimited)
+	resolveScope    bool // Whether to resolve transitive dependencies as scopes
 }
 
 // New creates a new CDN resolver with default settings.
@@ -61,16 +63,17 @@ func New(fetcher mappacdn.Fetcher) *Resolver {
 func (r *Resolver) WithProvider(provider mappacdn.Provider) *Resolver {
 	tmpl, _ := resolve.ParseTemplate(provider.ModuleTemplate)
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     provider,
-		registry:     r.registry,
-		template:     tmpl,
-		cache:        r.cache,
-		logger:       r.logger,
-		conditions:   r.conditions,
-		includeDev:   r.includeDev,
-		maxDepth:     r.maxDepth,
-		resolveScope: r.resolveScope,
+		fetcher:         r.fetcher,
+		provider:        provider,
+		registry:        r.registry,
+		template:        tmpl,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      r.conditions,
+		includeDev:      r.includeDev,
+		excludePackages: r.excludePackages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    r.resolveScope,
 	}
 }
 
@@ -81,64 +84,68 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 		return nil, err
 	}
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     r.provider,
-		registry:     r.registry,
-		template:     tmpl,
-		cache:        r.cache,
-		logger:       r.logger,
-		conditions:   r.conditions,
-		includeDev:   r.includeDev,
-		maxDepth:     r.maxDepth,
-		resolveScope: r.resolveScope,
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        tmpl,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      r.conditions,
+		includeDev:      r.includeDev,
+		excludePackages: r.excludePackages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    r.resolveScope,
 	}, nil
 }
 
 // WithLogger returns a new Resolver with the specified logger.
 func (r *Resolver) WithLogger(logger resolve.Logger) *Resolver {
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     r.provider,
-		registry:     r.registry,
-		template:     r.template,
-		cache:        r.cache,
-		logger:       logger,
-		conditions:   r.conditions,
-		includeDev:   r.includeDev,
-		maxDepth:     r.maxDepth,
-		resolveScope: r.resolveScope,
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        r.template,
+		cache:           r.cache,
+		logger:          logger,
+		conditions:      r.conditions,
+		includeDev:      r.includeDev,
+		excludePackages: r.excludePackages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    r.resolveScope,
 	}
 }
 
 // WithConditions returns a new Resolver with the specified export conditions.
 func (r *Resolver) WithConditions(conditions []string) *Resolver {
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     r.provider,
-		registry:     r.registry,
-		template:     r.template,
-		cache:        r.cache,
-		logger:       r.logger,
-		conditions:   conditions,
-		includeDev:   r.includeDev,
-		maxDepth:     r.maxDepth,
-		resolveScope: r.resolveScope,
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        r.template,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      conditions,
+		includeDev:      r.includeDev,
+		excludePackages: r.excludePackages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    r.resolveScope,
 	}
 }
 
 // WithIncludeDev returns a new Resolver that includes devDependencies.
 func (r *Resolver) WithIncludeDev(include bool) *Resolver {
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     r.provider,
-		registry:     r.registry,
-		template:     r.template,
-		cache:        r.cache,
-		logger:       r.logger,
-		conditions:   r.conditions,
-		includeDev:   include,
-		maxDepth:     r.maxDepth,
-		resolveScope: r.resolveScope,
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        r.template,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      r.conditions,
+		includeDev:      include,
+		excludePackages: r.excludePackages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    r.resolveScope,
 	}
 }
 
@@ -146,32 +153,52 @@ func (r *Resolver) WithIncludeDev(include bool) *Resolver {
 // 0 means unlimited (default), 1 means direct dependencies only.
 func (r *Resolver) WithMaxDepth(depth int) *Resolver {
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     r.provider,
-		registry:     r.registry,
-		template:     r.template,
-		cache:        r.cache,
-		logger:       r.logger,
-		conditions:   r.conditions,
-		includeDev:   r.includeDev,
-		maxDepth:     depth,
-		resolveScope: r.resolveScope,
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        r.template,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      r.conditions,
+		includeDev:      r.includeDev,
+		excludePackages: r.excludePackages,
+		maxDepth:        depth,
+		resolveScope:    r.resolveScope,
 	}
 }
 
 // WithResolveScope controls whether to generate scopes for transitive dependencies.
 func (r *Resolver) WithResolveScope(resolveScope bool) *Resolver {
 	return &Resolver{
-		fetcher:      r.fetcher,
-		provider:     r.provider,
-		registry:     r.registry,
-		template:     r.template,
-		cache:        r.cache,
-		logger:       r.logger,
-		conditions:   r.conditions,
-		includeDev:   r.includeDev,
-		maxDepth:     r.maxDepth,
-		resolveScope: resolveScope,
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        r.template,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      r.conditions,
+		includeDev:      r.includeDev,
+		excludePackages: r.excludePackages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    resolveScope,
+	}
+}
+
+// WithExclude returns a new Resolver that excludes the specified packages
+// from the generated import map, including as transitive dependencies.
+func (r *Resolver) WithExclude(packages []string) *Resolver {
+	return &Resolver{
+		fetcher:         r.fetcher,
+		provider:        r.provider,
+		registry:        r.registry,
+		template:        r.template,
+		cache:           r.cache,
+		logger:          r.logger,
+		conditions:      r.conditions,
+		includeDev:      r.includeDev,
+		excludePackages: packages,
+		maxDepth:        r.maxDepth,
+		resolveScope:    r.resolveScope,
 	}
 }
 
@@ -201,6 +228,10 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 				deps[name] = version
 			}
 		}
+	}
+
+	for _, pkg := range r.excludePackages {
+		delete(deps, pkg)
 	}
 
 	// Resolve each dependency
@@ -281,6 +312,9 @@ func (r *Resolver) resolvePackage(
 		sem := make(chan struct{}, 10)
 
 		for depName, depVer := range pkg.Dependencies {
+			if slices.Contains(r.excludePackages, depName) {
+				continue
+			}
 			wg.Add(1)
 			go func(name, ver string) {
 				defer wg.Done()

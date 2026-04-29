@@ -1,0 +1,11 @@
+{
+  "name": "lib-a",
+  "version": "1.0.0",
+  "exports": {
+    ".": {"import": "./index.js"},
+    "./util": {"import": "./util.js"}
+  },
+  "dependencies": {
+    "lib-b": "^1.0.0"
+  }
+}
