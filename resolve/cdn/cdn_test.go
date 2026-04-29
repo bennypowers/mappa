@@ -234,6 +234,111 @@ func TestBuildPackageImports(t *testing.T) {
 	}
 }
 
+func TestResolverWithExclude(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+
+	libARegistry := testutil.LoadFixtureFile(t, "lib-a-registry/response.json")
+	libAPackage := testutil.LoadFixtureFile(t, "lib-a-package/package.json")
+	libBRegistry := testutil.LoadFixtureFile(t, "lib-b-registry/response.json")
+	libBPackage := testutil.LoadFixtureFile(t, "lib-b-package/package.json")
+
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-a", libARegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-a@1.0.0/package.json", libAPackage)
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-b", libBRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-b@1.0.0/package.json", libBPackage)
+
+	ctx := context.Background()
+	pkg := &packagejson.PackageJSON{
+		Dependencies: map[string]string{
+			"lib-a": "^1.0.0",
+			"lib-b": "^1.0.0",
+		},
+	}
+
+	t.Run("without exclude both present", func(t *testing.T) {
+		resolver := New(mockFetcher)
+		im, err := resolver.ResolvePackageJSON(ctx, pkg)
+		if err != nil {
+			t.Fatalf("ResolvePackageJSON error: %v", err)
+		}
+		if im.Imports["lib-a"] == "" {
+			t.Error("Expected lib-a in imports")
+		}
+		if im.Imports["lib-b"] == "" {
+			t.Error("Expected lib-b in imports")
+		}
+	})
+
+	t.Run("transitive deps produce scopes", func(t *testing.T) {
+		pkgOnlyA := &packagejson.PackageJSON{
+			Dependencies: map[string]string{
+				"lib-a": "^1.0.0",
+			},
+		}
+		resolver := New(mockFetcher)
+		im, err := resolver.ResolvePackageJSON(ctx, pkgOnlyA)
+		if err != nil {
+			t.Fatalf("ResolvePackageJSON error: %v", err)
+		}
+		found := false
+		for _, scope := range im.Scopes {
+			if _, ok := scope["lib-b"]; ok {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Error("Expected lib-b in a scope as transitive dep of lib-a")
+		}
+	})
+
+	t.Run("exclude direct dependency", func(t *testing.T) {
+		resolver := New(mockFetcher).WithExclude([]string{"lib-b"})
+		im, err := resolver.ResolvePackageJSON(ctx, pkg)
+		if err != nil {
+			t.Fatalf("ResolvePackageJSON error: %v", err)
+		}
+		if im.Imports["lib-a"] == "" {
+			t.Error("Expected lib-a in imports")
+		}
+		for k := range im.Imports {
+			if k == "lib-b" || k == "lib-b/helpers" {
+				t.Errorf("Expected lib-b excluded from imports, found key %q", k)
+			}
+		}
+	})
+
+	t.Run("exclude transitive dependency", func(t *testing.T) {
+		pkgOnlyA := &packagejson.PackageJSON{
+			Dependencies: map[string]string{
+				"lib-a": "^1.0.0",
+			},
+		}
+		resolver := New(mockFetcher).WithExclude([]string{"lib-b"})
+		im, err := resolver.ResolvePackageJSON(ctx, pkgOnlyA)
+		if err != nil {
+			t.Fatalf("ResolvePackageJSON error: %v", err)
+		}
+		if im.Imports["lib-a"] == "" {
+			t.Error("Expected lib-a in imports")
+		}
+		// lib-b should not appear in imports
+		for k := range im.Imports {
+			if k == "lib-b" || k == "lib-b/helpers" {
+				t.Errorf("Expected lib-b excluded from imports, found key %q", k)
+			}
+		}
+		// lib-b should not appear in any scope
+		for scopeKey, scope := range im.Scopes {
+			for k := range scope {
+				if k == "lib-b" || k == "lib-b/helpers" {
+					t.Errorf("Expected lib-b excluded from scope %q, found key %q", scopeKey, k)
+				}
+			}
+		}
+	})
+}
+
 func TestBuildPackageImportsMainFallback(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 	resolver := New(mockFetcher)

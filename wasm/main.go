@@ -109,6 +109,9 @@ func doGenerate(args []js.Value) (string, error) {
 	if len(opts.conditions) > 0 {
 		resolver = resolver.WithConditions(opts.conditions)
 	}
+	if len(opts.exclude) > 0 {
+		resolver = resolver.WithExclude(opts.exclude)
+	}
 
 	ctx := context.Background()
 	im, err := resolver.ResolvePackageJSON(ctx, pkg)
@@ -195,6 +198,7 @@ type generateOptions struct {
 	cdn        string
 	template   string
 	conditions []string
+	exclude    []string
 }
 
 func parseGenerateOptions(args []js.Value) generateOptions {
@@ -213,6 +217,9 @@ func parseGenerateOptions(args []js.Value) generateOptions {
 	}
 	if v := obj.Get("conditions"); !v.IsUndefined() && !v.IsNull() {
 		opts.conditions = jsStringArray(v)
+	}
+	if v := obj.Get("exclude"); !v.IsUndefined() && !v.IsNull() {
+		opts.exclude = jsStringArray(v)
 	}
 
 	return opts
