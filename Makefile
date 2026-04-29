@@ -2,6 +2,7 @@
 .PHONY: linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64
 .PHONY: build-shared-windows-image
 .PHONY: wasm wasm-release wasm-serve
+.PHONY: release patch minor major
 
 BINARY_NAME := mappa
 DIST_DIR := dist/bin
@@ -121,3 +122,26 @@ wasm-serve: wasm
 	@echo "Serving WASM demo at http://localhost:8080"
 	# Requires Python 3 for the simple HTTP server
 	python3 -m http.server 8080 -d web
+
+# Extract version from goals if present (e.g., "make release v0.0.4" or "make release patch")
+VERSION ?= $(filter v% patch minor major,$(MAKECMDGOALS))
+
+## Make version targets (v*) and bump types no-ops for "make release" syntax
+v%:
+	@:
+
+patch minor major:
+	@:
+
+## Release (creates version commit, pushes it, then uses gh to tag and create release)
+release:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Error: VERSION or bump type is required"; \
+		echo "Usage: make release <version|patch|minor|major>"; \
+		echo "  make release v0.0.4   - Release explicit version"; \
+		echo "  make release patch    - Bump patch version (0.0.x)"; \
+		echo "  make release minor    - Bump minor version (0.x.0)"; \
+		echo "  make release major    - Bump major version (x.0.0)"; \
+		exit 1; \
+	fi
+	@./scripts/release.sh $(VERSION)
