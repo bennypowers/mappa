@@ -160,11 +160,12 @@ func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry 
 
 	wildcards := pkg.WildcardExports(opts)
 	for _, w := range wildcards {
-		// Only emit folder mappings for pure wildcards (no suffix transform).
-		// Patterns like "./*.js" -> "./src/*.mjs" can't be expressed as
-		// trailing-slash keys since the extension transform would be lost.
+		// Skip patterns with a suffix (e.g., "./*.js" -> "./src/*.mjs")
+		// since the pattern suffix can't be expressed as a trailing-slash key.
+		// Target suffixes are fine: the trailing-slash key maps the prefix,
+		// and the browser carries the rest (including any extension) through.
 		_, patternSuffix, _ := strings.Cut(w.Pattern, "*")
-		if patternSuffix != "" || w.TargetSuffix != "" {
+		if patternSuffix != "" {
 			continue
 		}
 		patternPrefix := strings.TrimSuffix(trimDotSlash(w.Pattern), "*")

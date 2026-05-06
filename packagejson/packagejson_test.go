@@ -706,6 +706,53 @@ func TestResolveImport(t *testing.T) {
 	}
 }
 
+func TestImportMapEntriesWildcardSubpath(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/wildcard-subpath-exports", "/test")
+
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Entries []struct {
+			Key  string `json:"key"`
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	entries := pkg.ImportMapEntries(nil)
+
+	// Build lookup for actual entries
+	actual := make(map[string]string)
+	for _, e := range entries {
+		actual[e.Key] = e.Path
+	}
+
+	for _, want := range expected.Entries {
+		got, ok := actual[want.Key]
+		if !ok {
+			t.Errorf("Missing entry for key %q", want.Key)
+			continue
+		}
+		if got != want.Path {
+			t.Errorf("Entry key %q: got path %q, want %q", want.Key, got, want.Path)
+		}
+	}
+
+	if len(entries) != len(expected.Entries) {
+		t.Errorf("Entry count: got %d, want %d\n  actual: %v", len(entries), len(expected.Entries), entries)
+	}
+}
+
 func TestResolveImportNoImportsField(t *testing.T) {
 	pkg := &packagejson.PackageJSON{Name: "test"}
 	_, err := pkg.ResolveImport("#anything", nil)

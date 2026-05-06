@@ -60,6 +60,7 @@ func TestResolver(t *testing.T) {
 		{"simple package", "simple-pkg"},
 		{"with scopes", "with-scopes"},
 		{"scope simplification with wildcards", "with-wildcard-scopes"},
+		{"wildcard subpath exports in scopes", "wildcard-subpath-scopes"},
 		{"circular dependencies", "circular-deps"},
 		{"nested node_modules", "nested-node-modules"},
 		{"peer dependencies in scopes", "with-peer-deps"},

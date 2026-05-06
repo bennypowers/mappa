@@ -1,0 +1,6 @@
+{
+  "name": "my-app",
+  "dependencies": {
+    "lit": "^3.0.0"
+  }
+}
