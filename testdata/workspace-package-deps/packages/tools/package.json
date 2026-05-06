@@ -1,0 +1,11 @@
+{
+  "name": "@myorg/tools",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "lodash": "^4.0.0"
+  }
+}

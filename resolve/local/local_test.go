@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -371,5 +372,356 @@ func TestResolverExplicitWorkspacesOverrideAutoDiscovery(t *testing.T) {
 	// Should NOT have the auto-discovered package (since explicit was provided)
 	if _, ok := result.Imports["@myorg/components"]; ok {
 		t.Error("Expected @myorg/components to not be auto-discovered when explicit packages provided")
+	}
+}
+
+func TestResolverWithPathBase(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	resolver := local.New(mfs, nil).WithPathBase("/test/examples/kitchen-sink")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(result.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", result.Imports, expected.Imports)
+	}
+
+	// Workspace package at serve root should be rebased to /
+	if result.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Errorf("Expected @examples/kitchen-sink/ to be rebased to /, got %s",
+			result.Imports["@examples/kitchen-sink/"])
+	}
+
+	// node_modules paths should be unchanged
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Expected lit path unchanged, got %s", result.Imports["lit"])
+	}
+
+	// Scope keys under node_modules should NOT be rebased
+	if !reflect.DeepEqual(result.Scopes, expected.Scopes) {
+		t.Errorf("Scopes mismatch:\n  got:      %v\n  expected: %v", result.Scopes, expected.Scopes)
+	}
+}
+
+func TestResolverWithPathBaseSameAsRoot(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected-no-rebase.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected-no-rebase.json: %v", err)
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected-no-rebase.json: %v", err)
+	}
+
+	// Serve root == resolution root: no rebasing
+	resolver := local.New(mfs, nil).WithPathBase("/test")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(result.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", result.Imports, expected.Imports)
+	}
+}
+
+func TestResolverWithPathBaseAutoDiscovery(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	// No explicit WithWorkspacePackages -- auto-discover + serve root
+	resolver := local.New(mfs, nil).WithPathBase("/test/examples/kitchen-sink")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if result.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Errorf("Expected @examples/kitchen-sink/ to be rebased to /, got %s",
+			result.Imports["@examples/kitchen-sink/"])
+	}
+
+	if result.Imports["@examples/kitchen-sink"] != "/src/index.js" {
+		t.Errorf("Expected @examples/kitchen-sink to be /src/index.js, got %s",
+			result.Imports["@examples/kitchen-sink"])
+	}
+
+	// Other workspace package paths should NOT be rebased
+	if result.Imports["@myorg/lib"] != "/packages/lib/src/index.js" {
+		t.Errorf("Expected @myorg/lib to remain /packages/lib/src/index.js, got %s",
+			result.Imports["@myorg/lib"])
+	}
+}
+
+func TestResolverWithPackageDeps(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-package-deps", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected-core-deps.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected-core-deps.json: %v", err)
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected-core-deps.json: %v", err)
+	}
+
+	resolver := local.New(mfs, nil).WithPackageDeps("/test/packages/core")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(result.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", result.Imports, expected.Imports)
+	}
+
+	// lit should be present (core dep)
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Expected lit import, got %s", result.Imports["lit"])
+	}
+
+	// lodash should NOT be present (tools dep, not core)
+	if _, ok := result.Imports["lodash"]; ok {
+		t.Error("Expected lodash to be excluded (not a dep of core)")
+	}
+
+	// Both workspace packages should still appear in imports
+	if result.Imports["@myorg/core"] != "/packages/core/src/index.js" {
+		t.Errorf("Expected @myorg/core workspace package, got %s", result.Imports["@myorg/core"])
+	}
+	if result.Imports["@myorg/tools"] != "/packages/tools/src/index.js" {
+		t.Errorf("Expected @myorg/tools workspace package, got %s", result.Imports["@myorg/tools"])
+	}
+}
+
+func TestResolverWithPackageDepsFallback(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-package-deps", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected-all-deps.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected-all-deps.json: %v", err)
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected-all-deps.json: %v", err)
+	}
+
+	// No WithPackageDeps: all deps from all workspace packages
+	resolver := local.New(mfs, nil)
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(result.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", result.Imports, expected.Imports)
+	}
+}
+
+func TestResolverWithPackageDepsError(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-package-deps", "/test")
+
+	resolver := local.New(mfs, nil).WithPackageDeps("/test/nonexistent")
+	_, err := resolver.Resolve("/test")
+	if err == nil {
+		t.Fatal("Expected error for nonexistent packageDeps path")
+	}
+	if !strings.Contains(err.Error(), "package-deps") {
+		t.Errorf("Expected error to mention package-deps, got: %v", err)
+	}
+}
+
+func TestResolverWithPathBaseAndPackageDeps(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-package-deps", "/test")
+
+	resolver := local.New(mfs, nil).
+		WithPathBase("/test/packages/core").
+		WithPackageDeps("/test/packages/core")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// core's path should be rebased
+	if result.Imports["@myorg/core"] != "/src/index.js" {
+		t.Errorf("Expected @myorg/core rebased to /src/index.js, got %s",
+			result.Imports["@myorg/core"])
+	}
+
+	// lit should be present (core dep)
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Expected lit import, got %s", result.Imports["lit"])
+	}
+
+	// lodash should NOT be present
+	if _, ok := result.Imports["lodash"]; ok {
+		t.Error("Expected lodash excluded")
+	}
+}
+
+func TestResolverBuilderPropagation(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	cache := packagejson.NewMemoryCache()
+
+	// Chain multiple builders to verify fields propagate
+	resolver := local.New(mfs, nil).
+		WithPathBase("/test/examples/kitchen-sink").
+		WithPackageDeps("/test/examples/kitchen-sink").
+		WithPackageCache(cache).
+		WithConditions([]string{"browser", "import", "default"}).
+		WithExclude([]string{"nonexistent-pkg"}).
+		WithPackages([]string{}).
+		WithIncludeRootExports()
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// PathBase should have survived the builder chain
+	if result.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Errorf("PathBase lost in builder chain: @examples/kitchen-sink/ = %s, want /",
+			result.Imports["@examples/kitchen-sink/"])
+	}
+
+	// PackageDeps should have survived: only kitchen-sink's dep (lit) should appear
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("PackageDeps lost in builder chain: lit = %s", result.Imports["lit"])
+	}
+}
+
+func TestOptionsApplyPathBaseAndPackageDeps(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	opts := &local.Options{
+		PathBase:   "/test/examples/kitchen-sink",
+		PackageDeps: "/test/examples/kitchen-sink",
+	}
+
+	resolver, err := opts.Apply(local.New(mfs, nil))
+	if err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if result.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Errorf("PathBase not applied via Options: @examples/kitchen-sink/ = %s, want /",
+			result.Imports["@examples/kitchen-sink/"])
+	}
+}
+
+func TestResolverWithPathBaseOutsideRoot(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	// pathBase outside rootDir -- should be a no-op
+	resolver := local.New(mfs, nil).WithPathBase("/other")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// paths should not be rebased
+	if result.Imports["@examples/kitchen-sink/"] != "/examples/kitchen-sink/" {
+		t.Errorf("Expected no rebasing, got @examples/kitchen-sink/ = %s",
+			result.Imports["@examples/kitchen-sink/"])
+	}
+}
+
+func TestResolverWithRelativePathBase(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	// Relative pathBase should be resolved relative to rootDir
+	resolver := local.New(mfs, nil).WithPathBase("examples/kitchen-sink")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if result.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Errorf("Relative pathBase not normalized: @examples/kitchen-sink/ = %s, want /",
+			result.Imports["@examples/kitchen-sink/"])
+	}
+}
+
+func TestResolverWithRelativePackageDeps(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-package-deps", "/test")
+
+	// Relative packageDeps should be resolved relative to rootDir
+	resolver := local.New(mfs, nil).WithPackageDeps("packages/core")
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	// lit should be present (core dep), lodash should not
+	if result.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Expected lit import with relative packageDeps, got %s", result.Imports["lit"])
+	}
+	if _, ok := result.Imports["lodash"]; ok {
+		t.Error("Expected lodash excluded with relative packageDeps")
+	}
+}
+
+func TestResolverWithPathBaseIncrementalIdempotent(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
+
+	workspacePackages := []resolve.WorkspacePackage{
+		{Name: "@examples/kitchen-sink", Path: "/test/examples/kitchen-sink"},
+		{Name: "@myorg/lib", Path: "/test/packages/lib"},
+	}
+
+	resolver := local.New(mfs, nil).
+		WithWorkspacePackages(workspacePackages).
+		WithPathBase("/test/examples/kitchen-sink")
+
+	// Initial resolve with graph
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+
+	if initial.ImportMap.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Fatalf("Initial rebase failed: @examples/kitchen-sink/ = %s",
+			initial.ImportMap.Imports["@examples/kitchen-sink/"])
+	}
+
+	// Incremental update -- simulate lit changing
+	incremental, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"lit"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	// Rebase should still be correct (idempotent on cloned entries)
+	if incremental.ImportMap.Imports["@examples/kitchen-sink/"] != "/" {
+		t.Errorf("Incremental rebase wrong: @examples/kitchen-sink/ = %s, want /",
+			incremental.ImportMap.Imports["@examples/kitchen-sink/"])
+	}
+	if incremental.ImportMap.Imports["lit"] != "/node_modules/lit/index.js" {
+		t.Errorf("Incremental lit wrong: %s", incremental.ImportMap.Imports["lit"])
 	}
 }

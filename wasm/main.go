@@ -232,6 +232,8 @@ type resolveOptions struct {
 	exclude         []string
 	inputMap        *importmap.ImportMap
 	optimize        int
+	pathBase         string
+	packageDeps     string
 }
 
 func (o *resolveOptions) localOptions() *local.Options {
@@ -241,6 +243,8 @@ func (o *resolveOptions) localOptions() *local.Options {
 		IncludePackages: o.includePackages,
 		Exclude:         o.exclude,
 		InputMap:        o.inputMap,
+		PathBase:         o.pathBase,
+		PackageDeps:     o.packageDeps,
 	}
 }
 
@@ -274,6 +278,12 @@ func parseResolveOptions(args []js.Value) (resolveOptions, error) {
 	}
 	if v := obj.Get("optimize"); !v.IsUndefined() && !v.IsNull() {
 		opts.optimize = v.Int()
+	}
+	if v := obj.Get("pathBase"); !v.IsUndefined() && !v.IsNull() {
+		opts.pathBase = v.String()
+	}
+	if v := obj.Get("packageDeps"); !v.IsUndefined() && !v.IsNull() {
+		opts.packageDeps = v.String()
 	}
 
 	return opts, nil
