@@ -18,6 +18,8 @@ npm/node_modules/
 npm/README.md
 npm/LICENSE
 
+RELEASE_NOTES.md
+
 # Test binary, built with `go test -c`
 *.test
 
