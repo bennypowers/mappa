@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "@myorg/core": "/packages/core/src/index.js",
+    "@myorg/tools": "/packages/tools/src/index.js",
+    "lit": "/node_modules/lit/index.js",
+    "lodash": "/node_modules/lodash/lodash.js"
+  }
+}

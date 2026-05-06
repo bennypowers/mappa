@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "@examples/kitchen-sink": "/examples/kitchen-sink/src/index.js",
+    "@examples/kitchen-sink/": "/examples/kitchen-sink/",
+    "@myorg/lib": "/packages/lib/src/index.js",
+    "lit": "/node_modules/lit/index.js",
+    "lit/decorators.js": "/node_modules/lit/decorators.js"
+  },
+  "scopes": {
+    "/node_modules/lit/": {
+      "@lit/reactive-element": "/node_modules/@lit/reactive-element/reactive-element.js"
+    }
+  }
+}

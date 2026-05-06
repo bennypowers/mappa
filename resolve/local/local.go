@@ -18,6 +18,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package local
 
 import (
+	"fmt"
 	"maps"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,8 @@ type Resolver struct {
 	includeRootExports bool
 	cache              packagejson.Cache
 	conditions         []string // export condition priority
+	pathBase          string
+	packageDeps        string
 }
 
 // New creates a new local Resolver.
@@ -68,6 +71,8 @@ func (r *Resolver) WithPackages(packages []string) *Resolver {
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
 }
 
@@ -85,6 +90,8 @@ func (r *Resolver) WithExclude(packages []string) *Resolver {
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
 }
 
@@ -105,6 +112,8 @@ func (r *Resolver) WithTemplate(pattern string) (*Resolver, error) {
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}, nil
 }
 
@@ -122,6 +131,8 @@ func (r *Resolver) WithInputMap(im *importmap.ImportMap) *Resolver {
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
 }
 
@@ -140,6 +151,8 @@ func (r *Resolver) WithWorkspacePackages(packages []resolve.WorkspacePackage) *R
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
 }
 
@@ -158,6 +171,8 @@ func (r *Resolver) WithIncludeRootExports() *Resolver {
 		includeRootExports: true,
 		cache:              r.cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
 }
 
@@ -177,6 +192,8 @@ func (r *Resolver) WithPackageCache(cache packagejson.Cache) *Resolver {
 		includeRootExports: r.includeRootExports,
 		cache:              cache,
 		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
 }
 
@@ -195,7 +212,69 @@ func (r *Resolver) WithConditions(conditions []string) *Resolver {
 		includeRootExports: r.includeRootExports,
 		cache:              r.cache,
 		conditions:         conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        r.packageDeps,
 	}
+}
+
+// WithPathBase returns a new Resolver that rebases workspace package paths
+// relative to the given directory instead of the resolution root.
+// Paths under node_modules are not affected.
+// Use this when resolving from a workspace root on behalf of a subdirectory
+// package, so that the subdirectory's own exports map to "/" rather than
+// their full workspace-relative path.
+func (r *Resolver) WithPathBase(dir string) *Resolver {
+	return &Resolver{
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
+		conditions:         r.conditions,
+		pathBase:          dir,
+		packageDeps:        r.packageDeps,
+	}
+}
+
+// WithPackageDeps returns a new Resolver that limits dependency collection
+// to only dependencies listed in the package.json at the given directory.
+// Without this, workspace resolution collects dependencies from every
+// workspace package, which may produce warnings for irrelevant packages.
+func (r *Resolver) WithPackageDeps(dir string) *Resolver {
+	return &Resolver{
+		fs:                 r.fs,
+		logger:             r.logger,
+		additionalPackages: r.additionalPackages,
+		excludePackages:    r.excludePackages,
+		template:           r.template,
+		inputMap:           r.inputMap,
+		workspacePackages:  r.workspacePackages,
+		includeRootExports: r.includeRootExports,
+		cache:              r.cache,
+		conditions:         r.conditions,
+		pathBase:          r.pathBase,
+		packageDeps:        dir,
+	}
+}
+
+// normalizePathOptions returns a new Resolver with pathBase and packageDeps
+// resolved to absolute paths relative to rootDir.
+func (r *Resolver) normalizePathOptions(rootDir string) *Resolver {
+	if r.pathBase == "" && r.packageDeps == "" {
+		return r
+	}
+	normalized := *r
+	if normalized.pathBase != "" && !filepath.IsAbs(normalized.pathBase) {
+		normalized.pathBase = filepath.Join(rootDir, normalized.pathBase)
+	}
+	if normalized.packageDeps != "" && !filepath.IsAbs(normalized.packageDeps) {
+		normalized.packageDeps = filepath.Join(rootDir, normalized.packageDeps)
+	}
+	return &normalized
 }
 
 // resolveOpts returns ResolveOptions for the configured conditions.
@@ -352,6 +431,8 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	}
 	rootDir = absRoot
 
+	r = r.normalizePathOptions(rootDir)
+
 	// Use workspace mode if workspace packages are explicitly configured
 	if len(r.workspacePackages) > 0 {
 		return r.resolveWorkspaceInternal(rootDir, graph)
@@ -487,18 +568,42 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		}
 	}
 
-	// 2. Collect dependencies from all workspace packages (excluding other workspace packages)
+	// 2. Collect dependencies (excluding other workspace packages)
 	allDeps := make(map[string]bool)
-	for _, pkg := range r.workspacePackages {
-		pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
+	if r.packageDeps != "" {
+		pkgJSON, err := r.parsePackageJSON(filepath.Join(r.packageDeps, "package.json"))
 		if err != nil {
-			continue
+			return nil, graph, fmt.Errorf("package-deps %s: %w", r.packageDeps, err)
+		}
+		var ownerName string
+		if graph != nil {
+			for _, pkg := range r.workspacePackages {
+				if pkg.Path == r.packageDeps {
+					ownerName = pkg.Name
+					break
+				}
+			}
 		}
 		for depName := range pkgJSON.Dependencies {
 			if !workspaceNames[depName] {
 				allDeps[depName] = true
-				if graph != nil {
-					graph.AddDependency(pkg.Name, depName)
+				if graph != nil && ownerName != "" {
+					graph.AddDependency(ownerName, depName)
+				}
+			}
+		}
+	} else {
+		for _, pkg := range r.workspacePackages {
+			pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
+			if err != nil {
+				continue
+			}
+			for depName := range pkgJSON.Dependencies {
+				if !workspaceNames[depName] {
+					allDeps[depName] = true
+					if graph != nil {
+						graph.AddDependency(pkg.Name, depName)
+					}
 				}
 			}
 		}
@@ -565,7 +670,10 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		result.Scopes = nil
 	}
 
-	// 5. Merge with input map if provided (input map takes precedence)
+	// 5. Rebase paths for serve root
+	r.rebaseImportMapForPathBase(result, rootDir)
+
+	// 6. Merge with input map if provided (input map takes precedence)
 	if r.inputMap != nil {
 		result = result.Merge(r.inputMap)
 	}
@@ -823,6 +931,8 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 	}
 	rootDir = absRoot
 
+	r = r.normalizePathOptions(rootDir)
+
 	// Invalidate cache for changed packages
 	if r.cache != nil {
 		for _, pkgName := range update.ChangedPackages {
@@ -866,7 +976,10 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 					pkg := resolve.WorkspacePackage{Name: name, Path: pkgPath}
 					newGraph.AddWorkspacePackage(name)
 					newGraph.SetPackagePath(name, pkgPath)
-					if err := r.addWorkspacePackageToImportMapWithGraph(result, pkg, rootDir, newGraph); err != nil {
+					mu.Lock()
+					err := r.addWorkspacePackageToImportMapWithGraph(result, pkg, rootDir, newGraph)
+					mu.Unlock()
+					if err != nil {
 						if r.logger != nil {
 							r.logger.Warning("Failed to re-add workspace package %s: %v", name, err)
 						}
@@ -923,6 +1036,9 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 		result.Scopes = nil
 	}
 
+	// Rebase paths for serve root
+	r.rebaseImportMapForPathBase(result, rootDir)
+
 	// Merge with input map if provided (input map takes precedence)
 	if r.inputMap != nil {
 		result = result.Merge(r.inputMap)
@@ -974,4 +1090,42 @@ func (r *Resolver) removePackageFromMap(im *importmap.ImportMap, pkgName string,
 	if scopeKey != "" && im.Scopes != nil {
 		delete(im.Scopes, scopeKey)
 	}
+}
+
+func (r *Resolver) rebaseImportMapForPathBase(im *importmap.ImportMap, rootDir string) {
+	if r.pathBase == "" {
+		return
+	}
+	relPath, err := filepath.Rel(rootDir, r.pathBase)
+	if err != nil || relPath == "." || strings.HasPrefix(relPath, "..") {
+		return
+	}
+	prefix := "/" + filepath.ToSlash(relPath)
+
+	for key, value := range im.Imports {
+		im.Imports[key] = rebasePath(value, prefix)
+	}
+
+	if im.Scopes != nil {
+		newScopes := make(map[string]map[string]string, len(im.Scopes))
+		for scopeKey, scopeMap := range im.Scopes {
+			newKey := rebasePath(scopeKey, prefix)
+			newMap := make(map[string]string, len(scopeMap))
+			for k, v := range scopeMap {
+				newMap[k] = rebasePath(v, prefix)
+			}
+			newScopes[newKey] = newMap
+		}
+		im.Scopes = newScopes
+	}
+}
+
+func rebasePath(path, prefix string) string {
+	if path == prefix {
+		return "/"
+	}
+	if after, ok := strings.CutPrefix(path, prefix+"/"); ok {
+		return "/" + after
+	}
+	return path
 }

@@ -28,6 +28,10 @@ export interface ResolveOptions {
   inputMap?: ImportMap;
   /** Optimization level: 0=none, 1=simplify+dedup (default: 1) */
   optimize?: 0 | 1;
+  /** Rebase workspace paths relative to this directory (node_modules paths unaffected) */
+  pathBase?: string;
+  /** Limit dependency resolution to this package's dependencies */
+  packageDeps?: string;
 }
 
 export interface ImportMap {

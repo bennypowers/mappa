@@ -68,6 +68,8 @@ func init() {
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify+dedup (default)")
 	Cmd.Flags().Bool("strict", false, "Exit non-zero on import map validation warnings")
+	Cmd.Flags().String("path-base", "", "Rebase workspace paths relative to this directory")
+	Cmd.Flags().String("package-deps", "", "Limit dependency resolution to this package's dependencies")
 
 	_ = viper.BindPFlag("format", Cmd.Flags().Lookup("format"))
 	_ = viper.BindPFlag("input-map", Cmd.Flags().Lookup("input-map"))
@@ -77,6 +79,8 @@ func init() {
 	_ = viper.BindPFlag("conditions", Cmd.Flags().Lookup("conditions"))
 	_ = viper.BindPFlag("optimize", Cmd.Flags().Lookup("optimize"))
 	_ = viper.BindPFlag("strict", Cmd.Flags().Lookup("strict"))
+	_ = viper.BindPFlag("path-base", Cmd.Flags().Lookup("path-base"))
+	_ = viper.BindPFlag("package-deps", Cmd.Flags().Lookup("package-deps"))
 }
 
 func run(cmd *cobra.Command, args []string) error {
@@ -116,6 +120,8 @@ func run(cmd *cobra.Command, args []string) error {
 		IncludePackages: viper.GetStringSlice("include-package"),
 		Exclude:         viper.GetStringSlice("exclude"),
 		InputMap:        inputMap,
+		PathBase:         viper.GetString("path-base"),
+		PackageDeps:     viper.GetString("package-deps"),
 	}
 
 	resolver, err := opts.Apply(local.New(osfs, nil))

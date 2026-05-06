@@ -30,6 +30,8 @@ type Options struct {
 	IncludePackages []string
 	Exclude         []string
 	InputMap        *importmap.ImportMap
+	PathBase    string
+	PackageDeps     string
 }
 
 // Apply configures the given Resolver with these options, returning the result.
@@ -55,6 +57,12 @@ func (o *Options) Apply(r *Resolver) (*Resolver, error) {
 	}
 	if o.InputMap != nil {
 		r = r.WithInputMap(o.InputMap)
+	}
+	if o.PathBase != "" {
+		r = r.WithPathBase(o.PathBase)
+	}
+	if o.PackageDeps != "" {
+		r = r.WithPackageDeps(o.PackageDeps)
 	}
 	return r, nil
 }
