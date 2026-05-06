@@ -575,22 +575,20 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		if err != nil {
 			return nil, graph, fmt.Errorf("package-deps %s: %w", r.packageDeps, err)
 		}
-		{
-			var ownerName string
-			if graph != nil {
-				for _, pkg := range r.workspacePackages {
-					if pkg.Path == r.packageDeps {
-						ownerName = pkg.Name
-						break
-					}
+		var ownerName string
+		if graph != nil {
+			for _, pkg := range r.workspacePackages {
+				if pkg.Path == r.packageDeps {
+					ownerName = pkg.Name
+					break
 				}
 			}
-			for depName := range pkgJSON.Dependencies {
-				if !workspaceNames[depName] {
-					allDeps[depName] = true
-					if graph != nil && ownerName != "" {
-						graph.AddDependency(ownerName, depName)
-					}
+		}
+		for depName := range pkgJSON.Dependencies {
+			if !workspaceNames[depName] {
+				allDeps[depName] = true
+				if graph != nil && ownerName != "" {
+					graph.AddDependency(ownerName, depName)
 				}
 			}
 		}
