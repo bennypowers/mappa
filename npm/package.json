@@ -1,6 +1,6 @@
 {
   "name": "@pwrs/mappa",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Generate ES module import maps from package.json",
   "type": "module",
   "license": "GPL-3.0-or-later",
@@ -23,12 +23,12 @@
     "test": "node --experimental-strip-types --test test/mappa.test.ts"
   },
   "optionalDependencies": {
-    "@pwrs/mappa-darwin-arm64": "0.0.5",
-    "@pwrs/mappa-darwin-x64": "0.0.5",
-    "@pwrs/mappa-linux-arm64": "0.0.5",
-    "@pwrs/mappa-linux-x64": "0.0.5",
-    "@pwrs/mappa-win32-arm64": "0.0.5",
-    "@pwrs/mappa-win32-x64": "0.0.5"
+    "@pwrs/mappa-darwin-arm64": "0.0.6",
+    "@pwrs/mappa-darwin-x64": "0.0.6",
+    "@pwrs/mappa-linux-arm64": "0.0.6",
+    "@pwrs/mappa-linux-x64": "0.0.6",
+    "@pwrs/mappa-win32-arm64": "0.0.6",
+    "@pwrs/mappa-win32-x64": "0.0.6"
   },
   "files": [
     "dist/mappa.js",
