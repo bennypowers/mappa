@@ -1,0 +1,18 @@
+{
+  "imports": {
+    "alpha": "/node_modules/alpha/index.js",
+    "beta": "/node_modules/beta/index.js",
+    "shared-lib": "/node_modules/shared-lib/index.js",
+    "shared-lib/": "/node_modules/shared-lib/src/"
+  },
+  "scopes": {
+    "/node_modules/alpha/": {
+      "shared-lib": "/node_modules/alpha/node_modules/shared-lib/v1.js",
+      "shared-lib/": "/node_modules/alpha/node_modules/shared-lib/lib/"
+    },
+    "/node_modules/beta/": {
+      "shared-lib": "/node_modules/shared-lib/index.js",
+      "shared-lib/": "/node_modules/shared-lib/src/"
+    }
+  }
+}

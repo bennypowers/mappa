@@ -64,6 +64,8 @@ func TestResolver(t *testing.T) {
 		{"circular dependencies", "circular-deps"},
 		{"nested node_modules", "nested-node-modules"},
 		{"peer dependencies in scopes", "with-peer-deps"},
+		{"nested dep trailing-slash exports", "nested-trailing-slash"},
+		{"mixed nested and hoisted with wildcards", "nested-mixed-hoisted"},
 	}
 
 	for _, tt := range tests {
