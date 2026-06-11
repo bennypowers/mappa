@@ -1,0 +1,6 @@
+{
+  "name": "nested-trailing-slash-test",
+  "dependencies": {
+    "parent-pkg": "^1.0.0"
+  }
+}

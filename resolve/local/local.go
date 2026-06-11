@@ -907,7 +907,11 @@ func (r *Resolver) expandDepURL(depName, filePath string, nested bool, depPath, 
 	if err != nil {
 		return r.template.Expand(depName, "", filePath)
 	}
-	return "/" + filepath.ToSlash(rel)
+	result := "/" + filepath.ToSlash(rel)
+	if strings.HasSuffix(filePath, "/") || filePath == "" {
+		result += "/"
+	}
+	return result
 }
 
 // parsePackageName extracts the package name from a package spec.

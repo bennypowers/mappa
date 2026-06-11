@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "parent-pkg": "/node_modules/parent-pkg/index.js"
+  },
+  "scopes": {
+    "/node_modules/parent-pkg/": {
+      "@nested/lib": "/node_modules/parent-pkg/node_modules/@nested/lib/index.js",
+      "@nested/lib/": "/node_modules/parent-pkg/node_modules/@nested/lib/src/",
+      "@nested/lib/controllers/": "/node_modules/parent-pkg/node_modules/@nested/lib/controllers/",
+      "no-exports-dep": "/node_modules/parent-pkg/node_modules/no-exports-dep/index.js",
+      "no-exports-dep/": "/node_modules/parent-pkg/node_modules/no-exports-dep/"
+    }
+  }
+}
