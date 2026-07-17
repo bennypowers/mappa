@@ -1,6 +1,5 @@
 .PHONY: all test lint clean install
 .PHONY: linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64
-.PHONY: build-shared-windows-image
 .PHONY: wasm wasm-release wasm-serve
 .PHONY: release patch minor major
 
@@ -8,8 +7,8 @@ BINARY_NAME := mappa
 DIST_DIR := dist/bin
 GO_BUILD_FLAGS := -ldflags="-s -w"
 
-# Shared Windows cross-compilation image (from go-release-workflows)
-SHARED_WINDOWS_CC_IMAGE := mappa-shared-windows-cc
+# Windows cross-compilation image (CI provides WINDOWS_IMAGE via go-release-workflows)
+WINDOWS_IMAGE ?= grw-windows-cross
 
 # Workaround for Gentoo Linux "hole in findfunctab" error with race detector
 # See: https://bugs.gentoo.org/961618
@@ -68,18 +67,8 @@ darwin-arm64:
 		CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
 		go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64 .
 
-# Build the shared Windows cross-compilation image (uses go-release-workflows Containerfile)
-build-shared-windows-image:
-	@if ! podman image exists $(SHARED_WINDOWS_CC_IMAGE); then \
-		echo "Building shared Windows cross-compilation image..."; \
-		curl -fsSL https://raw.githubusercontent.com/bennypowers/go-release-workflows/main/.github/actions/setup-windows-build/Containerfile \
-			| podman build -t $(SHARED_WINDOWS_CC_IMAGE) -f - .; \
-	else \
-		echo "Image $(SHARED_WINDOWS_CC_IMAGE) already exists, skipping build."; \
-	fi
-
 # Windows targets (requires Podman)
-win32-x64: build-shared-windows-image
+win32-x64:
 	@mkdir -p $(DIST_DIR)
 	podman run --rm \
 		-v $(PWD):/src:Z \
@@ -89,10 +78,10 @@ win32-x64: build-shared-windows-image
 		-e CGO_ENABLED=1 \
 		-e CC=x86_64-w64-mingw32-gcc \
 		-e CXX=x86_64-w64-mingw32-g++ \
-		$(SHARED_WINDOWS_CC_IMAGE) \
+		$(WINDOWS_IMAGE) \
 		go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-win32-x64.exe .
 
-win32-arm64: build-shared-windows-image
+win32-arm64:
 	@mkdir -p $(DIST_DIR)
 	podman run --rm \
 		-v $(PWD):/src:Z \
@@ -102,7 +91,7 @@ win32-arm64: build-shared-windows-image
 		-e CGO_ENABLED=1 \
 		-e CC=aarch64-w64-mingw32-gcc \
 		-e CXX=aarch64-w64-mingw32-g++ \
-		$(SHARED_WINDOWS_CC_IMAGE) \
+		$(WINDOWS_IMAGE) \
 		go build $(GO_BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-win32-arm64.exe .
 
 # WASM build targets (no CGO required)
