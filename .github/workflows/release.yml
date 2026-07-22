@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -44,16 +45,15 @@ jobs:
 
   npm:
     needs: [build, build-wasm]
-    uses: bennypowers/go-release-workflows/.github/workflows/npm-publish.yml@main
+    uses: bennypowers/go-release-workflows/.github/workflows/npm-publish.yml@v1.1
     with:
       binary-name: mappa
       npm-package-name: "@pwrs/mappa"
       release-tag: ${{ github.event.release.tag_name || inputs.release-tag }}
+      provenance: true
       pre-main-publish-script: |
         npm install && \
         npx tsc && \
         cp ../README.md ../LICENSE . && \
         node --experimental-strip-types ../scripts/update-platform-package-versions.ts && \
         bash ../scripts/download-wasm-assets.sh "$RELEASE_TAG"
-    secrets:
-      npm-token: ${{ secrets.NPM_TOKEN }}
