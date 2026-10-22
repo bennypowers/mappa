@@ -75,6 +75,16 @@ let initPromise: Promise<MappaApi> | null = null;
 async function init(): Promise<MappaApi> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
+    // Go's wasm_exec.js installs ENOSYS filesystem stubs when globalThis.fs
+    // and globalThis.path are missing. Node does not define them on
+    // globalThis, so a normal Node ESM process must bridge them before
+    // importing wasm_exec.js; otherwise local resolution silently fails.
+    if (typeof process !== "undefined" && process.versions?.node) {
+      const g = globalThis as Record<string, unknown>;
+      if (!g.fs) g.fs = await import("node:fs");
+      if (!g.path) g.path = await import("node:path");
+    }
+
     await import(pathToFileURL(join(__dirname, "wasm_exec.js")).href);
 
     const wasmPath = join(__dirname, "mappa.wasm");

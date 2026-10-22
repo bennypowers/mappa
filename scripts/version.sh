@@ -17,6 +17,12 @@ VERSION="$1"
 # Remove 'v' prefix if present
 VERSION="${VERSION#v}"
 
+# Validate VERSION is semver format before writing anything
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Error: Invalid version format '$VERSION'. Expected semver like 0.0.4"
+  exit 1
+fi
+
 echo "Updating version to: $VERSION"
 
 # Update npm/package.json main version
@@ -33,12 +39,6 @@ elif command -v node &> /dev/null; then
   "
 else
   echo "Error: jq or node is required to update version"
-  exit 1
-fi
-
-# Validate VERSION is semver format (basic check for safety)
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Error: Invalid version format '$VERSION'. Expected semver like 0.0.4"
   exit 1
 fi
 

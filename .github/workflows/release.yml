@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.release-tag }}
 
       - uses: actions/setup-go@v6
         with:
@@ -31,7 +33,9 @@ jobs:
           cache: true
 
       - name: Build WASM release binary
-        run: make wasm-release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release-tag }}
+        run: make wasm-release WASM_VERSION="$RELEASE_TAG"
 
       - name: Upload WASM assets to release
         env:

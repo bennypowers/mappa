@@ -17,6 +17,8 @@ for asset in mappa.wasm wasm_exec.js; do
     attempt=$((attempt + 1))
     echo "Downloading $asset (attempt $attempt/$MAX_RETRIES)..."
     if curl -fsSL \
+      --connect-timeout 10 \
+      --max-time 300 \
       -H "Accept: application/octet-stream" \
       "https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${asset}" \
       -o "dist/${asset}"; then

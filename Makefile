@@ -38,13 +38,13 @@ lint:
 	go vet ./...
 	golangci-lint run
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -x scripts/release.sh scripts/notes.sh scripts/lib/*.sh scripts/release-notes/*.sh; \
+		shellcheck -x scripts/release.sh scripts/notes.sh scripts/version.sh scripts/download-wasm-assets.sh scripts/lib/*.sh scripts/release-notes/*.sh; \
 	else \
 		echo "shellcheck not installed; skipping shell lint"; \
 	fi
 
 lint-shell:
-	shellcheck -x scripts/release.sh scripts/notes.sh scripts/lib/*.sh scripts/release-notes/*.sh
+	shellcheck -x scripts/release.sh scripts/notes.sh scripts/version.sh scripts/download-wasm-assets.sh scripts/lib/*.sh scripts/release-notes/*.sh
 
 test-scripts:
 	@./scripts/release-notes/test.sh
@@ -107,14 +107,16 @@ win32-arm64:
 
 # WASM build targets (no CGO required)
 # Note: trace package is excluded (uses tree-sitter CGO), only generate functionality is available
+WASM_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+WASM_LDFLAGS := -X 'bennypowers.dev/mappa/internal/version.Version=$(WASM_VERSION)'
 
 wasm:
-	GOOS=js GOARCH=wasm go build -o web/mappa.wasm ./wasm
+	GOOS=js GOARCH=wasm go build -ldflags="$(WASM_LDFLAGS)" -o web/mappa.wasm ./wasm
 	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
 	@echo "WASM build complete: web/mappa.wasm"
 
 wasm-release:
-	GOOS=js GOARCH=wasm go build $(GO_BUILD_FLAGS) -o web/mappa.wasm ./wasm
+	GOOS=js GOARCH=wasm go build $(GO_BUILD_FLAGS) -ldflags="-s -w $(WASM_LDFLAGS)" -o web/mappa.wasm ./wasm
 	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
 	@echo "WASM release build complete: web/mappa.wasm"
 

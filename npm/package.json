@@ -19,8 +19,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "postinstall": "[ -f dist/postinstall.js ] && node dist/postinstall.js || true",
-    "test": "node --experimental-strip-types --test test/mappa.test.ts"
+    "postinstall": "node ./postinstall.cjs",
+    "test": "node --experimental-strip-types --test test/mappa.test.ts test/no-setup.test.ts"
   },
   "optionalDependencies": {
     "@pwrs/mappa-darwin-arm64": "0.0.7",
@@ -31,6 +31,7 @@
     "@pwrs/mappa-win32-x64": "0.0.7"
   },
   "files": [
+    "postinstall.cjs",
     "dist/mappa.js",
     "dist/mappa.d.ts",
     "dist/cli.js",

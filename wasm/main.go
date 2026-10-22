@@ -24,30 +24,39 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"syscall/js"
 
 	"bennypowers.dev/mappa/cdn"
 	mappfs "bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/internal/version"
 	"bennypowers.dev/mappa/packagejson"
 	cdnresolver "bennypowers.dev/mappa/resolve/cdn"
 	"bennypowers.dev/mappa/resolve/local"
 	"bennypowers.dev/mappa/wasm/options"
 )
 
-// Version is the mappa WASM version.
-const Version = "0.1.0"
-
 func main() {
 	mappa := make(map[string]any)
 	mappa["generate"] = js.FuncOf(generate)
 	mappa["resolve"] = js.FuncOf(resolveLocal)
-	mappa["version"] = Version
+	mappa["version"] = version.VersionString()
 
 	js.Global().Set("mappa", js.ValueOf(mappa))
 
 	select {}
 }
+
+// stderrLogger writes resolution warnings to stderr (console in browsers).
+type stderrLogger struct{}
+
+func (stderrLogger) Warning(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
+}
+
+func (stderrLogger) Debug(format string, args ...any) {}
 
 // generate creates an import map from package.json contents using a CDN resolver.
 //
@@ -66,6 +75,11 @@ func generate(this js.Value, args []js.Value) any {
 		reject := promiseArgs[1]
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					reject.Invoke(js.Global().Get("Error").New(fmt.Sprintf("mappa generate panicked: %v", r)))
+				}
+			}()
 			result, err := doGenerate(args)
 			if err != nil {
 				reject.Invoke(newJSError(err))
@@ -99,9 +113,9 @@ func doGenerate(args []js.Value) (string, error) {
 	}
 
 	fetcher := cdn.NewHTTPFetcher()
-	resolver, err := opts.Apply(cdnresolver.New(fetcher))
+	resolver, err := opts.Apply(cdnresolver.New(fetcher).WithLogger(stderrLogger{}))
 	if err != nil {
-		return "", &jsError{message: "invalid template: " + err.Error()}
+		return "", &jsError{message: err.Error()}
 	}
 
 	ctx := context.Background()
@@ -135,6 +149,11 @@ func resolveLocal(this js.Value, args []js.Value) any {
 		reject := promiseArgs[1]
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					reject.Invoke(js.Global().Get("Error").New(fmt.Sprintf("mappa resolve panicked: %v", r)))
+				}
+			}()
 			result, err := doResolve(args)
 			if err != nil {
 				reject.Invoke(js.Global().Get("Error").New(err.Error()))
@@ -163,7 +182,7 @@ func doResolve(args []js.Value) (string, error) {
 	}
 
 	osfs := mappfs.NewOSFileSystem()
-	resolver, err := opts.localOptions().Apply(local.New(osfs, nil))
+	resolver, err := opts.localOptions().Apply(local.New(osfs, stderrLogger{}))
 	if err != nil {
 		return "", &jsError{message: err.Error()}
 	}
@@ -192,6 +211,9 @@ func parseGenerateOptions(args []js.Value) (options.Generate, error) {
 	}
 
 	obj := args[1]
+	if obj.Type() != js.TypeObject {
+		return opts, &jsError{message: "options must be an object"}
+	}
 
 	if v := obj.Get("cdn"); !v.IsUndefined() && !v.IsNull() {
 		opts.CDN = v.String()
@@ -200,10 +222,18 @@ func parseGenerateOptions(args []js.Value) (options.Generate, error) {
 		opts.Template = v.String()
 	}
 	if v := obj.Get("conditions"); !v.IsUndefined() && !v.IsNull() {
-		opts.Conditions = jsStringArray(v)
+		var err error
+		opts.Conditions, err = jsStringArray("conditions", v)
+		if err != nil {
+			return opts, err
+		}
 	}
 	if v := obj.Get("exclude"); !v.IsUndefined() && !v.IsNull() {
-		opts.Exclude = jsStringArray(v)
+		var err error
+		opts.Exclude, err = jsStringArray("exclude", v)
+		if err != nil {
+			return opts, err
+		}
 	}
 	if v := obj.Get("timeoutMs"); !v.IsUndefined() && !v.IsNull() {
 		if v.Type() != js.TypeNumber {
@@ -271,20 +301,38 @@ func parseResolveOptions(args []js.Value) (resolveOptions, error) {
 	}
 
 	obj := args[1]
+	if obj.Type() != js.TypeObject {
+		return opts, &jsError{message: "options must be an object"}
+	}
 
 	if v := obj.Get("template"); !v.IsUndefined() && !v.IsNull() {
 		opts.template = v.String()
 	}
 	if v := obj.Get("conditions"); !v.IsUndefined() && !v.IsNull() {
-		opts.conditions = jsStringArray(v)
+		var err error
+		opts.conditions, err = jsStringArray("conditions", v)
+		if err != nil {
+			return opts, err
+		}
 	}
 	if v := obj.Get("includePackages"); !v.IsUndefined() && !v.IsNull() {
-		opts.includePackages = jsStringArray(v)
+		var err error
+		opts.includePackages, err = jsStringArray("includePackages", v)
+		if err != nil {
+			return opts, err
+		}
 	}
 	if v := obj.Get("exclude"); !v.IsUndefined() && !v.IsNull() {
-		opts.exclude = jsStringArray(v)
+		var err error
+		opts.exclude, err = jsStringArray("exclude", v)
+		if err != nil {
+			return opts, err
+		}
 	}
 	if v := obj.Get("inputMap"); !v.IsUndefined() && !v.IsNull() {
+		if v.Type() != js.TypeObject {
+			return opts, &jsError{message: "inputMap must be an object"}
+		}
 		inputMapStr := js.Global().Get("JSON").Call("stringify", v).String()
 		im, err := importmap.Parse([]byte(inputMapStr))
 		if err != nil {
@@ -293,6 +341,9 @@ func parseResolveOptions(args []js.Value) (resolveOptions, error) {
 		opts.inputMap = im
 	}
 	if v := obj.Get("optimize"); !v.IsUndefined() && !v.IsNull() {
+		if v.Type() != js.TypeNumber {
+			return opts, &jsError{message: "optimize must be a number"}
+		}
 		opts.optimize = v.Int()
 	}
 	if v := obj.Get("pathBase"); !v.IsUndefined() && !v.IsNull() {
@@ -305,13 +356,20 @@ func parseResolveOptions(args []js.Value) (resolveOptions, error) {
 	return opts, nil
 }
 
-func jsStringArray(v js.Value) []string {
+func jsStringArray(name string, v js.Value) ([]string, error) {
+	if v.Type() != js.TypeObject {
+		return nil, &jsError{message: name + " must be an array of strings"}
+	}
 	length := v.Length()
 	result := make([]string, length)
 	for i := range length {
-		result[i] = v.Index(i).String()
+		item := v.Index(i)
+		if item.Type() != js.TypeString {
+			return nil, &jsError{message: name + " must contain only strings"}
+		}
+		result[i] = item.String()
 	}
-	return result
+	return result, nil
 }
 
 type jsError struct {

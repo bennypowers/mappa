@@ -25,3 +25,34 @@ jobs:
         run: go install gotest.tools/gotestsum
       - name: Run tests
         run: make test
+      - name: Run script tests
+        run: make test-scripts
+
+  npm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build WASM
+        run: make wasm
+      - name: Install npm dependencies
+        working-directory: npm
+        run: npm ci
+      - name: Copy WASM assets
+        run: |
+          mkdir -p npm/dist
+          cp web/mappa.wasm web/wasm_exec.js npm/dist/
+      - name: Type-check and build
+        working-directory: npm
+        run: |
+          npm run build
+          npx tsc --noEmit
+      - name: Run npm tests
+        working-directory: npm
+        run: npm test
