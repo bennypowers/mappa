@@ -107,33 +107,6 @@ echo "✓ Release notes found: $NOTES_FILE"
 echo "✓ Release notes are current"
 echo ""
 
-echo "Step 1: Updating version files and committing..."
-"$SCRIPT_DIR/version.sh" "$VERSION" || {
-  echo ""
-  echo "Error: Version update was rejected or failed"
-  echo "Release flow aborted"
-  exit 1
-}
-echo ""
-write_release_notes_meta "$META_FILE" "$VERSION" "$(git rev-parse HEAD)"
-
-# Strip 'v' prefix for version comparison
-CHECK_VERSION="${VERSION#v}"
-
-echo "Step 2: Verifying version sync..."
-if command -v jq &> /dev/null; then
-  NPM_VERSION=$(jq -r '.version' npm/package.json)
-else
-  NPM_VERSION=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('npm/package.json','utf8')).version)")
-fi
-
-if [ "$NPM_VERSION" != "$CHECK_VERSION" ]; then
-  echo "  ✗ npm/package.json has version $NPM_VERSION (expected $CHECK_VERSION)"
-  exit 1
-fi
-echo "  ✓ npm/package.json: $NPM_VERSION"
-echo ""
-
 # Check for uncommitted changes
 if [[ $(git status --porcelain 2>/dev/null) ]]; then
   echo "Error: Working directory has uncommitted changes"
@@ -165,6 +138,33 @@ fi
 echo ""
 
 echo "Creating release $VERSION..."
+echo ""
+
+echo "Step 1: Updating version files and committing..."
+"$SCRIPT_DIR/version.sh" "$VERSION" || {
+  echo ""
+  echo "Error: Version update was rejected or failed"
+  echo "Release flow aborted"
+  exit 1
+}
+echo ""
+write_release_notes_meta "$META_FILE" "$VERSION" "$(git rev-parse HEAD)"
+
+# Strip 'v' prefix for version comparison
+CHECK_VERSION="${VERSION#v}"
+
+echo "Step 2: Verifying version sync..."
+if command -v jq &> /dev/null; then
+  NPM_VERSION=$(jq -r '.version' npm/package.json)
+else
+  NPM_VERSION=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('npm/package.json','utf8')).version)")
+fi
+
+if [ "$NPM_VERSION" != "$CHECK_VERSION" ]; then
+  echo "  ✗ npm/package.json has version $NPM_VERSION (expected $CHECK_VERSION)"
+  exit 1
+fi
+echo "  ✓ npm/package.json: $NPM_VERSION"
 echo ""
 
 echo "Step 3: Pushing version commit..."
