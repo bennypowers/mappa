@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "ok-pkg": "/node_modules/ok-pkg/index.js"
+  }
+}

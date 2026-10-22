@@ -1,0 +1,14 @@
+{
+  "imports": {
+    "str-to-null": null,
+    "null-to-str": "/override.js",
+    "both-null": null
+  },
+  "scopes": {
+    "/scope/": {
+      "str-to-null": null,
+      "null-to-str": "/override-scoped.js",
+      "both-null": null
+    }
+  }
+}

@@ -48,13 +48,14 @@ type cacheEntry struct {
 type MemoryCache struct {
 	mu      sync.RWMutex
 	cache   map[string]*PackageJSON
-	loading sync.Map // map[string]*cacheEntry for in-flight loads
+	loading map[string]*cacheEntry // in-flight loads
 }
 
 // NewMemoryCache creates a new in-memory cache for package.json files.
 func NewMemoryCache() *MemoryCache {
 	return &MemoryCache{
-		cache: make(map[string]*PackageJSON),
+		cache:   make(map[string]*PackageJSON),
+		loading: make(map[string]*cacheEntry),
 	}
 }
 
@@ -76,40 +77,50 @@ func (c *MemoryCache) Set(path string, pkg *PackageJSON) {
 // Invalidate removes a cached entry and any in-flight loading state.
 func (c *MemoryCache) Invalidate(path string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.cache, path)
-	c.mu.Unlock()
-	c.loading.Delete(path)
+	delete(c.loading, path)
 }
 
 // GetOrLoad atomically retrieves from cache or loads using the provided function.
 // Only one goroutine will execute the loader for a given path; others wait for the result.
 func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)) (*PackageJSON, error) {
-	// Fast path: check if already cached
-	c.mu.RLock()
-	if pkg, ok := c.cache[path]; ok {
-		c.mu.RUnlock()
+	// Fast path: check if already cached. The nil guard is defensive: Set may
+	// store a nil value, but GetOrLoad must still run the loader so callers get
+	// fresh data or a real error rather than a silent nil success.
+	c.mu.Lock()
+	if pkg, ok := c.cache[path]; ok && pkg != nil {
+		c.mu.Unlock()
 		return pkg, nil
 	}
-	c.mu.RUnlock()
+	entry, ok := c.loading[path]
+	if !ok {
+		entry = &cacheEntry{}
+		c.loading[path] = entry
+	}
+	c.mu.Unlock()
 
-	// Get or create an entry for this path - all concurrent goroutines get the same entry
-	actual, _ := c.loading.LoadOrStore(path, &cacheEntry{})
-	entry := actual.(*cacheEntry)
-
-	// Only one goroutine executes the loader; others block until once.Do completes
+	// Only one goroutine executes the loader; others block until once.Do completes.
 	entry.once.Do(func() {
 		entry.pkg, entry.err = loader()
-		if entry.err == nil {
+		if entry.err == nil && entry.pkg != nil {
 			c.mu.Lock()
-			c.cache[path] = entry.pkg
+			// Skip storing if Invalidate (or a newer load) replaced this entry.
+			if c.loading[path] == entry {
+				c.cache[path] = entry.pkg
+			}
 			c.mu.Unlock()
 		}
 	})
 
-	// Note: We don't delete from c.loading here because it would race with
-	// concurrent LoadOrStore calls. Entries remain until Invalidate is called.
-	// This is acceptable: entries are small (sync.Once + pointers) and bounded
-	// by unique paths. Invalidate clears both maps for proper cache refresh.
+	// Do not cache failures or successful nil loads: both must be retryable.
+	// Delete only if this entry is still the current one, so an Invalidate
+	// followed by a fresh load is not clobbered.
+	c.mu.Lock()
+	if c.loading[path] == entry && (entry.err != nil || entry.pkg == nil) {
+		delete(c.loading, path)
+	}
+	c.mu.Unlock()
 
 	return entry.pkg, entry.err
 }

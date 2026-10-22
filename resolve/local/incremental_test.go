@@ -230,3 +230,97 @@ func TestDependencyGraphRemovePackage(t *testing.T) {
 		t.Errorf("Expected C to no longer have B as dependent, got %v", deps)
 	}
 }
+
+func TestResolveIncrementalMatchesFullForTransitive(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/with-scopes", "/test")
+	resolver := local.New(mfs, nil)
+
+	full, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+	inc, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"@lit/reactive-element"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+	if !reflect.DeepEqual(full.Imports, inc.ImportMap.Imports) {
+		t.Errorf("incremental imports diverge from full:\n full: %v\n inc:  %v", full.Imports, inc.ImportMap.Imports)
+	}
+	if !reflect.DeepEqual(full.Scopes, inc.ImportMap.Scopes) {
+		t.Errorf("incremental scopes diverge from full:\n full: %v\n inc:  %v", full.Scopes, inc.ImportMap.Scopes)
+	}
+}
+
+func TestResolveIncrementalIncludesWorkspaceDependencies(t *testing.T) {
+	// The root manifest declares only root-dep; lit is reachable through a
+	// workspace package. Incremental resolution must still treat it as a
+	// direct package rather than dropping it after a change.
+	mfs := testutil.NewFixtureFS(t, "resolve/workspace-direct-deps", "/test")
+
+	resolver := local.New(mfs, nil).WithWorkspacePackages([]resolve.WorkspacePackage{
+		{Name: "@scope/a", Path: "/test/packages/a"},
+	})
+
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("Initial ResolveWithGraph failed: %v", err)
+	}
+	wantLit, ok := initial.ImportMap.Imports["lit"]
+	if !ok {
+		t.Fatalf("expected lit in the initial map, got %v", initial.ImportMap.Imports)
+	}
+
+	result, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"lit"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	if got := result.ImportMap.Imports["lit"]; got != wantLit {
+		t.Errorf("lit import after incremental = %q, want %q", got, wantLit)
+	}
+	if got := result.ImportMap.Imports["@scope/a"]; got != "/packages/a/src/index.js" {
+		t.Errorf("@scope/a import after incremental = %q", got)
+	}
+}
+
+func TestResolveIncrementalKeepsExcludedWorkspacePackagesOut(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace", "/test")
+
+	resolver := local.New(mfs, nil).WithExclude([]string{"@myorg/components"})
+
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("Initial ResolveWithGraph failed: %v", err)
+	}
+	if _, ok := initial.ImportMap.Imports["@myorg/components"]; ok {
+		t.Fatalf("excluded package present in initial map: %v", initial.ImportMap.Imports)
+	}
+
+	result, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"@myorg/components"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	if _, ok := result.ImportMap.Imports["@myorg/components"]; ok {
+		t.Error("excluded workspace package was re-added by incremental resolution")
+	}
+	if got := result.ImportMap.Imports["@myorg/core"]; got != "/packages/core/src/index.js" {
+		t.Errorf("@myorg/core import after incremental = %q", got)
+	}
+}

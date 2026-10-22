@@ -149,6 +149,51 @@ func TestMerge(t *testing.T) {
 	}
 }
 
+func TestMergeNullPrecedence(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/merge-null-precedence", "/test")
+
+	base := mustParseFixture(t, mfs, "/test/base.json")
+	override := mustParseFixture(t, mfs, "/test/override.json")
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	result := base.Merge(override)
+
+	// Compare the serialized form so that null entries, which live in side
+	// tables, are part of the assertion rather than silently disappearing.
+	actualData, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var actual, expected map[string]any
+	if err := json.Unmarshal(actualData, &actual); err != nil {
+		t.Fatalf("Failed to unmarshal actual: %v", err)
+	}
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to unmarshal expected: %v", err)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("Merge null precedence mismatch:\n  got:      %s\n  expected: %s", actualData, expectedData)
+	}
+}
+
+func mustParseFixture(t *testing.T, mfs interface {
+	ReadFile(string) ([]byte, error)
+}, path string) *importmap.ImportMap {
+	t.Helper()
+	data, err := mfs.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %v", path, err)
+	}
+	im, err := importmap.Parse(data)
+	if err != nil {
+		t.Fatalf("Failed to parse %s: %v", path, err)
+	}
+	return im
+}
+
 func TestToJSON(t *testing.T) {
 	im := &importmap.ImportMap{
 		Imports: map[string]string{
@@ -333,6 +378,62 @@ func TestValidate(t *testing.T) {
 	})
 }
 
+func TestValidateOrdering(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/validate-order", "/test")
+
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected []*importmap.ValidationError
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	first := im.Validate()
+	if !reflect.DeepEqual(first, expected) {
+		t.Fatalf("Unexpected error sequence:\n  got:      %v\n  expected: %v", first, expected)
+	}
+
+	// Map iteration order is randomized, so repeated calls must still agree.
+	for i := 0; i < 25; i++ {
+		if got := im.Validate(); !reflect.DeepEqual(got, first) {
+			t.Fatalf("Validation order changed across calls:\n  first: %v\n  call %d: %v", first, i, got)
+		}
+	}
+}
+
+func TestParseRejectsNonStringValues(t *testing.T) {
+	for _, dir := range []string{
+		"invalid-value-number",
+		"invalid-value-boolean",
+		"invalid-value-object",
+	} {
+		t.Run(dir, func(t *testing.T) {
+			mfs := testutil.NewFixtureFS(t, "importmap/"+dir, "/test")
+
+			input, err := mfs.ReadFile("/test/input.json")
+			if err != nil {
+				t.Fatalf("Failed to read input.json: %v", err)
+			}
+
+			if _, err := importmap.Parse(input); err == nil {
+				t.Fatal("Expected Parse to reject a non-string import map value")
+			}
+		})
+	}
+}
+
 func TestValidationErrorString(t *testing.T) {
 	t.Run("top-level error", func(t *testing.T) {
 		e := &importmap.ValidationError{Key: "lit/", Value: "/bad", Message: "test msg"}
@@ -446,5 +547,149 @@ func TestSimplifyEntries(t *testing.T) {
 	}
 	if result["other"] != "/node_modules/other/index.js" {
 		t.Error("unrelated key 'other' should be kept")
+	}
+}
+
+func TestNullValuesRoundTrip(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/null-values", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if _, ok := im.Imports["blocked"]; ok {
+		t.Error("null import value should not appear as a string entry")
+	}
+	if errs := im.Validate(); len(errs) != 0 {
+		t.Errorf("null values should be valid, got: %v", errs)
+	}
+
+	out, err := json.MarshalIndent(im, "", "  ")
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(out), `"blocked": null`) {
+		t.Errorf("expected null import to round-trip, got: %s", out)
+	}
+	if !strings.Contains(string(out), `"blocked-subpath": null`) {
+		t.Errorf("expected null scope entry to round-trip, got: %s", out)
+	}
+	if !strings.Contains(string(out), `"lit": "/node_modules/lit/index.js"`) {
+		t.Errorf("expected string import to round-trip, got: %s", out)
+	}
+}
+
+func TestValidateRejectsEmptyKey(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/empty-key", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if errs := im.Validate(); len(errs) == 0 {
+		t.Fatal("expected an error for an empty specifier key")
+	}
+}
+
+func TestValidateRejectsNullEmptyKey(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/null-key", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	errs := im.Validate()
+	var topLevel, scoped, badScope bool
+	for _, e := range errs {
+		switch {
+		case e.Key == "" && e.Scope == "":
+			topLevel = true
+		case e.Key == "" && e.Scope == "not-a-url":
+			scoped = true
+		}
+		if e.Scope == "not-a-url" && strings.Contains(e.Message, "scope key") {
+			badScope = true
+		}
+	}
+	if !topLevel {
+		t.Error("expected an error for the null empty top-level key")
+	}
+	if !scoped {
+		t.Error("expected an error for the null empty scoped key")
+	}
+	if !badScope {
+		t.Error("expected an error for the invalid null-only scope key")
+	}
+}
+
+func TestLookupLongestPrefixWinsAcrossNulls(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/lookup-precedence", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	tests := []struct {
+		specifier string
+		want      string
+		wantOK    bool
+	}{
+		// A longer null prefix blocks a shorter string prefix.
+		{"foo/bar/deep.js", "", false},
+		// The shorter matching string prefix still resolves other subpaths.
+		{"foo/other.js", "/foo/other.js", true},
+		// A longer string prefix beats a shorter null prefix.
+		{"baz/qux/mod.js", "/baz/qux/mod.js", true},
+		// The shorter null prefix blocks everything else.
+		{"baz/other.js", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := im.Lookup(tt.specifier)
+		if ok != tt.wantOK || got != tt.want {
+			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", tt.specifier, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
+func TestLookupHonorsNullEntries(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/null-trailing-slash", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	tests := []struct {
+		specifier string
+		want      string
+		wantOK    bool
+	}{
+		{"blocked", "", false},
+		{"blocked/deep.js", "", false},
+		{"pkg/exact", "/pkg/exact.js", true},
+		{"lit", "/node_modules/lit/index.js", true},
+	}
+	for _, tt := range tests {
+		got, ok := im.Lookup(tt.specifier)
+		if ok != tt.wantOK || got != tt.want {
+			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", tt.specifier, got, ok, tt.want, tt.wantOK)
+		}
 	}
 }

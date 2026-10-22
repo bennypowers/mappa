@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -50,6 +49,33 @@ func (m *mockLogger) Debug(format string, args ...any) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.debugs = append(m.debugs, fmt.Sprintf(format, args...))
+}
+
+// assertImportMapGolden compares the full resolved import map against a
+// fixture golden, honoring the shared -update flag.
+func assertImportMapGolden(t *testing.T, actual *importmap.ImportMap, goldenPath string) {
+	t.Helper()
+
+	data, err := json.MarshalIndent(actual, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal import map: %v", err)
+	}
+	expectedData := testutil.LoadGoldenFile(t, goldenPath)
+	if expectedData == nil {
+		testutil.UpdateGoldenFile(t, goldenPath, append(data, '\n'))
+		return
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse golden %s: %v", goldenPath, err)
+	}
+	if !reflect.DeepEqual(actual.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", actual.Imports, expected.Imports)
+	}
+	if !reflect.DeepEqual(actual.Scopes, expected.Scopes) {
+		t.Errorf("Scopes mismatch:\n  got:      %v\n  expected: %v", actual.Scopes, expected.Scopes)
+	}
 }
 
 func TestResolver(t *testing.T) {
@@ -252,7 +278,7 @@ func TestResolverCacheReuse(t *testing.T) {
 	}
 }
 
-func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
+func TestResolverDefaultsToIndexJS(t *testing.T) {
 	mfs := testutil.NewFixtureFS(t, "resolve/no-exports-pkg", "/test")
 
 	logger := &mockLogger{}
@@ -262,18 +288,19 @@ func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	// Should only have trailing slash mapping, not bare specifier
-	if _, ok := result.Imports["broken-lib"]; ok {
-		t.Error("Expected no bare specifier mapping for package without exports/main")
+	// Node falls back to index.js when neither exports nor main is present.
+	if got := result.Imports["broken-lib"]; got != "/node_modules/broken-lib/index.js" {
+		t.Errorf("Expected index.js fallback for bare specifier, got %q", got)
 	}
 	if result.Imports["broken-lib/"] != "/node_modules/broken-lib/" {
 		t.Errorf("Expected trailing slash mapping, got %v", result.Imports)
 	}
 
-	// Should have logged a warning
-	expectedWarning := "Package 'broken-lib' has no root export or main field; only subpath imports will work"
-	if !slices.Contains(logger.warnings, expectedWarning) {
-		t.Errorf("Expected warning %q, got warnings: %v", expectedWarning, logger.warnings)
+	// A root export now exists, so no warning should be logged.
+	for _, w := range logger.warnings {
+		if strings.Contains(w, "no root export or main field") {
+			t.Errorf("Unexpected warning: %q", w)
+		}
 	}
 }
 
@@ -312,6 +339,45 @@ func TestResolverAutoDiscoverWorkspaces(t *testing.T) {
 	if result.Imports["lit"] != expected.Imports["lit"] {
 		t.Errorf("lit import = %q, want %q", result.Imports["lit"], expected.Imports["lit"])
 	}
+}
+
+func TestResolveIncrementalAutoDiscoversWorkspaces(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/workspace-direct-deps", "/test")
+
+	// A fresh resolver has no explicit workspace packages; both the initial
+	// and incremental passes must auto-discover them from the root manifest.
+	resolver := local.New(mfs, nil)
+
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+	if got := initial.ImportMap.Imports["lit"]; got != "/node_modules/lit/index.js" {
+		t.Fatalf("initial lit import = %q, want /node_modules/lit/index.js", got)
+	}
+	if got := initial.ImportMap.Imports["@scope/a"]; got != "/packages/a/src/index.js" {
+		t.Fatalf("initial @scope/a import = %q, want /packages/a/src/index.js", got)
+	}
+	assertImportMapGolden(t, initial.ImportMap, "resolve/workspace-direct-deps/expected.json")
+
+	incremental, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"lit"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	// lit is a direct dependency of the auto-discovered workspace package, so
+	// it must remain a top-level import after being re-resolved.
+	if got := incremental.ImportMap.Imports["lit"]; got != "/node_modules/lit/index.js" {
+		t.Errorf("incremental lit import = %q, want /node_modules/lit/index.js", got)
+	}
+	if got := incremental.ImportMap.Imports["@scope/a"]; got != "/packages/a/src/index.js" {
+		t.Errorf("incremental @scope/a import = %q, want /packages/a/src/index.js", got)
+	}
+	assertImportMapGolden(t, incremental.ImportMap, "resolve/workspace-direct-deps/expected.json")
 }
 
 func TestResolverWithExclude(t *testing.T) {
@@ -614,7 +680,7 @@ func TestOptionsApplyPathBaseAndPackageDeps(t *testing.T) {
 	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
 
 	opts := &local.Options{
-		PathBase:   "/test/examples/kitchen-sink",
+		PathBase:    "/test/examples/kitchen-sink",
 		PackageDeps: "/test/examples/kitchen-sink",
 	}
 
@@ -727,4 +793,209 @@ func TestResolverWithPathBaseIncrementalIdempotent(t *testing.T) {
 	if incremental.ImportMap.Imports["lit"] != "/node_modules/lit/index.js" {
 		t.Errorf("Incremental lit wrong: %s", incremental.ImportMap.Imports["lit"])
 	}
+}
+
+func TestResolveSpecifiersWildcardTargetSuffix(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/wildcard-target-suffix", "/test")
+	resolver := local.New(mfs, nil)
+
+	full, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if _, ok := full.Imports["suffix-pkg/"]; ok {
+		t.Errorf("suffix-target wildcard must not be emitted as a trailing-slash key: %v", full.Imports)
+	}
+
+	got := resolver.ResolveSpecifiers("/test", []string{"suffix-pkg", "suffix-pkg/foo"})
+	if got["suffix-pkg"] != "/node_modules/suffix-pkg/index.js" {
+		t.Errorf("suffix-pkg = %q", got["suffix-pkg"])
+	}
+	if got["suffix-pkg/foo"] != "/node_modules/suffix-pkg/dist/foo.js" {
+		t.Errorf("suffix-pkg/foo = %q, want exact wildcard resolution", got["suffix-pkg/foo"])
+	}
+	assertImportMapGolden(t, full, "resolve/wildcard-target-suffix/expected.json")
+}
+
+func TestResolveSpecifiersBareEntryFallback(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/specifiers-module-main", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+	var expected map[string]string
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	got := local.New(mfs, nil).ResolveSpecifiers("/test", []string{"dual-entry"})
+	if !reflect.DeepEqual(got, expected) {
+		t.Errorf("ResolveSpecifiers mismatch:\n  got:      %v\n  expected: %v", got, expected)
+	}
+}
+
+func TestResolveNestedCascade(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/nested-cascade", "/test")
+	resolver := local.New(mfs, nil)
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if got := result.Scopes["/node_modules/alpha/node_modules/shared-lib/"]; got["helper"] != "/node_modules/helper/index.js" {
+		t.Errorf("nested scope should find hoisted helper, got scopes: %v", result.Scopes)
+	}
+	if got := result.Scopes["/node_modules/shared-lib/"]; got["helper"] != "/node_modules/helper/index.js" {
+		t.Errorf("hoisted scope should find helper, got scopes: %v", result.Scopes)
+	}
+	if _, ok := result.Imports["helper"]; ok {
+		t.Errorf("transitive helper must not be a top-level import: %v", result.Imports)
+	}
+	assertImportMapGolden(t, result, "resolve/nested-cascade/expected.json")
+}
+
+func TestResolveAdditionalPackageScopes(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/include-transitive", "/test")
+	resolver := local.New(mfs, nil).WithPackages([]string{"fuse.js"})
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if result.Imports["fuse.js"] != "/node_modules/fuse.js/fuse.js" {
+		t.Errorf("expected fuse.js import, got %v", result.Imports)
+	}
+	if got := result.Scopes["/node_modules/fuse.js/"]; got["leaf"] != "/node_modules/leaf/index.js" {
+		t.Errorf("expected leaf scope for included package, got scopes: %v", result.Scopes)
+	}
+	assertImportMapGolden(t, result, "resolve/include-transitive/expected.json")
+}
+
+func TestResolveExcludesTransitiveScopes(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/include-transitive", "/test")
+	resolver := local.New(mfs, nil).WithPackages([]string{"fuse.js"}).WithExclude([]string{"leaf"})
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if _, ok := result.Scopes["/node_modules/fuse.js/"]["leaf"]; ok {
+		t.Errorf("excluded package must not appear in scopes: %v", result.Scopes)
+	}
+}
+
+func TestResolveNestedOfNested(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/nested-of-nested", "/test")
+	result, err := local.New(mfs, nil).Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	nestedScope := result.Scopes["/node_modules/alpha/node_modules/shared-lib/"]
+	want := "/node_modules/alpha/node_modules/shared-lib/node_modules/helper/index.js"
+	if nestedScope["helper"] != want {
+		t.Errorf("nested-of-nested helper = %q, want %q (scopes: %v)", nestedScope["helper"], want, result.Scopes)
+	}
+	if _, ok := result.Imports["helper"]; ok {
+		t.Errorf("transitive helper must not be a top-level import: %v", result.Imports)
+	}
+	assertImportMapGolden(t, result, "resolve/nested-of-nested/expected.json")
+}
+
+func TestResolveDoesNotWalkAboveWorkspaceRoot(t *testing.T) {
+	// The fixture is mounted at "/" so the node_modules tree above the
+	// workspace root (/test) is visible at /node_modules.
+	mfs := testutil.NewFixtureFS(t, "resolve/above-root-escape", "/")
+
+	result, err := local.New(mfs, nil).Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	for scope, entries := range result.Scopes {
+		if _, ok := entries["escapee"]; ok {
+			t.Fatalf("scope %q resolved a dependency above the workspace root: %v", scope, entries)
+		}
+	}
+}
+
+// synthesizedDependencyList returns n distinct, syntactically valid
+// dependencies as a JSON object body.
+func synthesizedDependencyList(n int) string {
+	entries := make([]string, n)
+	for i := range n {
+		entries[i] = fmt.Sprintf(`"pkg-%d":"1.0.0"`, i)
+	}
+	return strings.Join(entries, ",")
+}
+
+func TestResolveRejectsTooManyDependencies(t *testing.T) {
+	t.Run("root package", func(t *testing.T) {
+		mfs := mapfs.New()
+		mfs.AddFile("/test/package.json", `{"name":"root","private":true,"dependencies":{`+
+			synthesizedDependencyList(10001)+`}}`, 0644)
+
+		_, err := local.New(mfs, nil).Resolve("/test")
+		if err == nil {
+			t.Fatal("expected an error for a package declaring more than the dependency cap")
+		}
+		if !strings.Contains(err.Error(), "maximum 10000") {
+			t.Errorf("expected cap in error, got: %v", err)
+		}
+	})
+
+	t.Run("workspace package", func(t *testing.T) {
+		mfs := mapfs.New()
+		mfs.AddDir("/test/packages", 0755)
+		mfs.AddDir("/test/packages/a", 0755)
+		mfs.AddFile("/test/package.json",
+			`{"name":"root","private":true,"workspaces":["packages/*"]}`, 0644)
+		mfs.AddFile("/test/packages/a/package.json", `{"name":"@scope/a","private":true,"dependencies":{`+
+			synthesizedDependencyList(10001)+`}}`, 0644)
+
+		_, err := local.New(mfs, nil).Resolve("/test")
+		if err == nil {
+			t.Fatal("expected an error for a workspace declaring more than the dependency cap")
+		}
+		if !strings.Contains(err.Error(), "maximum 10000") {
+			t.Errorf("expected cap in error, got: %v", err)
+		}
+	})
+}
+
+func TestResolveIgnoresInvalidDependencyNames(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/invalid-dep-name", "/test")
+
+	resolver := local.New(mfs, nil)
+	result, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+
+	if got := result.ImportMap.Imports["ok-pkg"]; got != "/node_modules/ok-pkg/index.js" {
+		t.Errorf("ok-pkg import = %q, want /node_modules/ok-pkg/index.js", got)
+	}
+	for key, value := range result.ImportMap.Imports {
+		if strings.Contains(key, "evil") || strings.Contains(key, "escape") {
+			t.Errorf("invalid dependency leaked into imports: %q -> %q", key, value)
+		}
+		if strings.Contains(value, "..") {
+			t.Errorf("import %q escapes the web root: %q", key, value)
+		}
+	}
+	for _, scope := range result.ImportMap.Scopes {
+		for key := range scope {
+			if strings.Contains(key, "evil") || strings.Contains(key, "escape") {
+				t.Errorf("invalid dependency leaked into scopes: %q", key)
+			}
+		}
+	}
+	if result.DependencyGraph != nil {
+		for _, name := range []string{"../evil", "../../escape"} {
+			if deps := result.DependencyGraph.Dependents(name); len(deps) > 0 {
+				t.Errorf("invalid dependency %q was added to the graph with dependents %v", name, deps)
+			}
+		}
+	}
+	assertImportMapGolden(t, result.ImportMap, "resolve/invalid-dep-name/expected.json")
 }

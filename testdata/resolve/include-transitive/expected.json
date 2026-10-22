@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "fuse.js": "/node_modules/fuse.js/fuse.js"
+  },
+  "scopes": {
+    "/node_modules/fuse.js/": {
+      "leaf": "/node_modules/leaf/index.js"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "imports": {
+    "z-bad/": "/z-bad",
+    "a-bad": "not-a-url",
+    "m-bad": ""
+  },
+  "scopes": {
+    "/z-scope/": {
+      "z-key/": "/z-value",
+      "a-key": "nope"
+    },
+    "/a-scope/": {
+      "empty": "also-bad"
+    }
+  }
+}

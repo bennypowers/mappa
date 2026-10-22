@@ -18,6 +18,7 @@ package packagejson_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"bennypowers.dev/mappa/packagejson"
@@ -321,7 +322,7 @@ func TestHasTrailingSlashExport(t *testing.T) {
 		dir      string
 		expected bool
 	}{
-		{"wildcard exports", "wildcard-exports", true},
+		{"wildcard exports with target suffix", "wildcard-exports", false},
 		{"main fallback", "main-fallback", true},
 		{"no exports", "no-exports", true},
 		{"subpath exports (no wildcard)", "subpath-exports", false},
@@ -812,5 +813,107 @@ func TestPeerAndOptionalDependencies(t *testing.T) {
 		if pkg.OptionalDependencies[name] != version {
 			t.Errorf("OptionalDependencies[%q] = %q, want %q", name, pkg.OptionalDependencies[name], version)
 		}
+	}
+}
+
+func TestBareEntryFallbacks(t *testing.T) {
+	tests := []struct {
+		name string
+		dir  string
+	}{
+		{"module preferred over main", "module-entry"},
+		{"index.js fallback", "index-fallback"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mfs := testutil.NewFixtureFS(t, "packagejson/"+tt.dir, "/test")
+			pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+			if err != nil {
+				t.Fatalf("ParseFile failed: %v", err)
+			}
+			expectedBytes, err := mfs.ReadFile("/test/expected.json")
+			if err != nil {
+				t.Fatalf("ReadFile expected.json failed: %v", err)
+			}
+			var expected struct {
+				Resolved string `json:"resolved"`
+				Entries  []struct {
+					Key  string `json:"key"`
+					Path string `json:"path"`
+				} `json:"entries"`
+			}
+			if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+				t.Fatalf("Unmarshal expected.json failed: %v", err)
+			}
+
+			resolved, err := pkg.ResolveExport(".", nil)
+			if err != nil {
+				t.Fatalf("ResolveExport failed: %v", err)
+			}
+			if resolved != expected.Resolved {
+				t.Errorf("ResolveExport(\".\") = %q, want %q", resolved, expected.Resolved)
+			}
+
+			entries := pkg.ImportMapEntries(nil)
+			actual := make(map[string]string, len(entries))
+			for _, e := range entries {
+				actual[e.Key] = e.Path
+			}
+			want := make(map[string]string, len(expected.Entries))
+			for _, e := range expected.Entries {
+				want[e.Key] = e.Path
+			}
+			if !reflect.DeepEqual(actual, want) {
+				t.Errorf("entries mismatch:\n  got:      %v\n  expected: %v", actual, want)
+			}
+			if len(entries) != len(expected.Entries) {
+				t.Errorf("entry count: got %d, want %d", len(entries), len(expected.Entries))
+			}
+		})
+	}
+}
+
+func TestTopLevelArrayExports(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "packagejson/top-level-array-exports", "/test")
+	pkg, err := packagejson.ParseFile(mfs, "/test/package.json")
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("ReadFile expected.json failed: %v", err)
+	}
+	var expected struct {
+		Resolved string `json:"resolved"`
+		Entries  []struct {
+			Key  string `json:"key"`
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Unmarshal expected.json failed: %v", err)
+	}
+
+	resolved, err := pkg.ResolveExport(".", nil)
+	if err != nil {
+		t.Fatalf("ResolveExport failed: %v", err)
+	}
+	if resolved != expected.Resolved {
+		t.Errorf("ResolveExport(\".\") = %q, want %q", resolved, expected.Resolved)
+	}
+	entries := pkg.ImportMapEntries(nil)
+	actual := make(map[string]string, len(entries))
+	for _, e := range entries {
+		actual[e.Key] = e.Path
+	}
+	want := make(map[string]string, len(expected.Entries))
+	for _, e := range expected.Entries {
+		want[e.Key] = e.Path
+	}
+	if !reflect.DeepEqual(actual, want) {
+		t.Errorf("entries mismatch:\n  got:      %v\n  expected: %v", actual, want)
+	}
+	if len(entries) != len(expected.Entries) {
+		t.Errorf("entry count: got %d, want %d", len(entries), len(expected.Entries))
 	}
 }

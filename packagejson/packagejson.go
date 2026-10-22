@@ -130,15 +130,51 @@ func ParseFile(fs fs.FileSystem, path string) (*PackageJSON, error) {
 	return Parse(data)
 }
 
+// BareEntry returns the package's default entry point, preferring the ESM
+// "module" field, then the legacy "main" field, and finally index.js, matching
+// Node's resolution when no "exports" field is present.
+func (pkg *PackageJSON) BareEntry() string {
+	if pkg.Module != "" {
+		return trimDotSlash(pkg.Module)
+	}
+	if pkg.Main != "" {
+		return trimDotSlash(pkg.Main)
+	}
+	return "index.js"
+}
+
+// exportsObject normalizes the "exports" field into a subpath map.
+// A top-level array is sugar for {".": array}; a string is sugar for
+// {".": "..."}. Returns false when exports is absent or has an invalid shape.
+func (pkg *PackageJSON) exportsObject() (map[string]any, bool) {
+	switch v := pkg.Exports.(type) {
+	case map[string]any:
+		return v, true
+	case []any:
+		return map[string]any{".": v}, true
+	case string:
+		return map[string]any{".": v}, true
+	default:
+		return nil, false
+	}
+}
+
 // ImportMapEntry represents a single key-path pair for building import maps.
 type ImportMapEntry struct {
 	Key  string // Import key relative to package name (e.g., "", "/", "/utils")
 	Path string // Target path relative to package root (e.g., "index.js", "dist/")
 }
 
-// ImportMapEntries returns all entries needed for an import map: explicit
-// exports, wildcard trailing-slash keys, and a plain trailing-slash fallback
-// for packages with no exports. The caller maps each entry's Path to a URL.
+// ImportMapEntries returns the entries needed for a full import map: explicit
+// exports, representable wildcard trailing-slash keys, and a plain
+// trailing-slash fallback for packages with no exports. The caller maps each
+// entry's Path to a URL.
+//
+// Wildcard exports whose pattern or target carries a suffix cannot be
+// expressed as trailing-slash keys and are deliberately omitted here. Exact
+// entries for those specifiers are emitted only by ResolveSpecifiers (used by
+// trace and inject); full Resolve/generate defers them, since emitting a
+// trailing-slash key would send the browser to the wrong target.
 //
 // Key conventions:
 //   - "" means the bare package specifier (e.g., "lit")
@@ -146,6 +182,15 @@ type ImportMapEntry struct {
 //   - "/sub" means a subpath key (e.g., "lit/sub")
 func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry {
 	var result []ImportMapEntry
+
+	// With no exports field, Node falls back to module, then main, then index.js.
+	if pkg.Exports == nil {
+		result = append(result, ImportMapEntry{Key: "", Path: pkg.BareEntry()})
+		if pkg.HasTrailingSlashExport(opts) {
+			result = append(result, ImportMapEntry{Key: "/", Path: ""})
+		}
+		return result
+	}
 
 	entries := pkg.ExportEntries(opts)
 	for _, entry := range entries {
@@ -160,12 +205,7 @@ func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry 
 
 	wildcards := pkg.WildcardExports(opts)
 	for _, w := range wildcards {
-		// Skip patterns with a suffix (e.g., "./*.js" -> "./src/*.mjs")
-		// since the pattern suffix can't be expressed as a trailing-slash key.
-		// Target suffixes are fine: the trailing-slash key maps the prefix,
-		// and the browser carries the rest (including any extension) through.
-		_, patternSuffix, _ := strings.Cut(w.Pattern, "*")
-		if patternSuffix != "" {
+		if !trailingSlashEligibleWildcard(w) {
 			continue
 		}
 		patternPrefix := strings.TrimSuffix(trimDotSlash(w.Pattern), "*")
@@ -175,14 +215,7 @@ func (pkg *PackageJSON) ImportMapEntries(opts *ResolveOptions) []ImportMapEntry 
 		})
 	}
 
-	if len(entries) == 0 && pkg.Main != "" && pkg.Exports == nil {
-		result = append(result, ImportMapEntry{
-			Key:  "",
-			Path: trimDotSlash(pkg.Main),
-		})
-	}
-
-	if pkg.HasTrailingSlashExport(opts) && len(wildcards) == 0 {
+	if len(wildcards) == 0 && pkg.HasTrailingSlashExport(opts) {
 		result = append(result, ImportMapEntry{Key: "/", Path: ""})
 	}
 
@@ -245,14 +278,15 @@ func (pkg *PackageJSON) ResolveImport(specifier string, opts *ResolveOptions) (s
 // The subpath should be "." for the main export or "./subpath" for subpath exports.
 // Returns the resolved path without leading "./".
 // Pass nil for opts to use DefaultConditions.
+//
+// When the package has no "exports" field, "." resolves through BareEntry
+// (module, then main, then index.js) and any other subpath returns
+// ErrNotExported. Callers that receive ErrNotExported for a bare specifier may
+// fall back to BareEntry themselves.
 func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (string, error) {
 	if pkg.Exports == nil {
-		// Fall back to main field
-		if pkg.Main != "" {
-			if subpath == "." {
-				return trimDotSlash(pkg.Main), nil
-			}
-			return "", ErrNotExported
+		if subpath == "." {
+			return pkg.BareEntry(), nil
 		}
 		return "", ErrNotExported
 	}
@@ -265,8 +299,8 @@ func (pkg *PackageJSON) ResolveExport(subpath string, opts *ResolveOptions) (str
 		return "", ErrNotExported
 	}
 
-	// Handle exports map
-	exportsMap, ok := pkg.Exports.(map[string]any)
+	// Handle exports map, including top-level array sugar ({".": value}).
+	exportsMap, ok := pkg.exportsObject()
 	if !ok {
 		return "", ErrNotExported
 	}
@@ -337,13 +371,10 @@ func (pkg *PackageJSON) ExportEntries(opts *ResolveOptions) []ExportEntry {
 	var entries []ExportEntry
 
 	if pkg.Exports == nil {
-		// No exports field - check main
-		if pkg.Main != "" {
-			entries = append(entries, ExportEntry{
-				Subpath: ".",
-				Target:  trimDotSlash(pkg.Main),
-			})
-		}
+		entries = append(entries, ExportEntry{
+			Subpath: ".",
+			Target:  pkg.BareEntry(),
+		})
 		return entries
 	}
 
@@ -356,8 +387,8 @@ func (pkg *PackageJSON) ExportEntries(opts *ResolveOptions) []ExportEntry {
 		return entries
 	}
 
-	// Handle exports map
-	exportsMap, ok := pkg.Exports.(map[string]any)
+	// Handle exports map, including top-level array sugar ({".": value}).
+	exportsMap, ok := pkg.exportsObject()
 	if !ok {
 		return entries
 	}
@@ -408,7 +439,7 @@ func (pkg *PackageJSON) ExportEntries(opts *ResolveOptions) []ExportEntry {
 func (pkg *PackageJSON) WildcardExports(opts *ResolveOptions) []WildcardExport {
 	var wildcards []WildcardExport
 
-	exportsMap, ok := pkg.Exports.(map[string]any)
+	exportsMap, ok := pkg.exportsObject()
 	if !ok {
 		return wildcards
 	}
@@ -463,13 +494,26 @@ func resolveWildcardTargetWithOpts(value any, opts *ResolveOptions) string {
 // HasTrailingSlashExport returns true if the package should have a trailing slash import.
 // Pass nil for opts to use DefaultConditions.
 func (pkg *PackageJSON) HasTrailingSlashExport(opts *ResolveOptions) bool {
-	if len(pkg.WildcardExports(opts)) > 0 {
-		return true
-	}
 	if pkg.Exports == nil {
 		return true
 	}
+	for _, w := range pkg.WildcardExports(opts) {
+		if trailingSlashEligibleWildcard(w) {
+			return true
+		}
+	}
 	return false
+}
+
+// trailingSlashEligibleWildcard reports whether a wildcard export can be
+// expressed as a trailing-slash import map key. A wildcard whose pattern has a
+// suffix (e.g. "./*.js") or whose target has a suffix (e.g. "./*" ->
+// "./dist/*.js") cannot: the browser would request a different specifier than
+// the pattern describes. Exact entries for those specifiers are emitted only
+// by ResolveSpecifiers (trace/inject); full Resolve/generate defers them.
+func trailingSlashEligibleWildcard(w WildcardExport) bool {
+	_, patternSuffix, _ := strings.Cut(w.Pattern, "*")
+	return patternSuffix == "" && w.TargetSuffix == ""
 }
 
 // resolveExportValueWithOpts resolves an export value with custom conditions.

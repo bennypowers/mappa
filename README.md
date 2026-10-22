@@ -151,7 +151,8 @@ The trace command uses static analysis to find imports. This means:
   import(`@rhds/icons/standard/${iconName}.js`);
   ```
 
-- To handle dynamic imports, mappa includes **trailing-slash import map keys** for all direct dependencies that have wildcard exports. For example, if your package.json lists `@rhds/icons` as a dependency and that package exports `./*`, the import map will include `"@rhds/icons/": "/assets/packages/@rhds/icons/"` to cover any dynamic imports.
+- To handle dynamic imports, mappa includes **trailing-slash import map keys** for direct dependencies whose wildcard exports can be expressed that way (the pattern and target have no suffix). For example, if your package.json lists `@rhds/icons` as a dependency and that package exports `./*`, the import map will include `"@rhds/icons/": "/assets/packages/@rhds/icons/"` to cover any dynamic imports.
+- Wildcards with a suffix (for example `./*.js` or `./*` targeting `./dist/*.js`) cannot be represented by a trailing-slash key. `trace` and `inject` emit exact keys for the specifiers they discover; full `generate` does not emit an entry for these wildcards, because a trailing-slash key would resolve to the wrong file.
 
 - The same applies to scopes: transitive dependencies with wildcard exports get trailing-slash keys so their dynamic imports work correctly.
 

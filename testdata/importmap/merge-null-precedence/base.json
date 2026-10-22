@@ -1,0 +1,17 @@
+{
+  "imports": {
+    "str-to-null": "/base.js",
+    "null-to-str": null,
+    "keep-null": null,
+    "both-null": null,
+    "untouched": "/untouched.js"
+  },
+  "scopes": {
+    "/scope/": {
+      "str-to-null": "/base-scoped.js",
+      "null-to-str": null,
+      "keep-null": null,
+      "both-null": null
+    }
+  }
+}

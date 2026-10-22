@@ -1,0 +1,34 @@
+[
+  {
+    "key": "a-bad",
+    "value": "not-a-url",
+    "message": "value must be a valid URL or start with /, ./, or ../"
+  },
+  {
+    "key": "m-bad",
+    "message": "value must be a valid URL or start with /, ./, or ../"
+  },
+  {
+    "key": "z-bad/",
+    "value": "/z-bad",
+    "message": "trailing-slash key must map to a value ending with /"
+  },
+  {
+    "scope": "/a-scope/",
+    "key": "empty",
+    "value": "also-bad",
+    "message": "value must be a valid URL or start with /, ./, or ../"
+  },
+  {
+    "scope": "/z-scope/",
+    "key": "a-key",
+    "value": "nope",
+    "message": "value must be a valid URL or start with /, ./, or ../"
+  },
+  {
+    "scope": "/z-scope/",
+    "key": "z-key/",
+    "value": "/z-value",
+    "message": "trailing-slash key must map to a value ending with /"
+  }
+]

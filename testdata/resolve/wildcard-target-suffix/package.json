@@ -1,0 +1,4 @@
+{
+  "name": "app",
+  "dependencies": { "suffix-pkg": "^1.0.0" }
+}

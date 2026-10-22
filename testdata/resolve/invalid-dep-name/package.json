@@ -1,0 +1,8 @@
+{
+  "name": "invalid-dep-root",
+  "private": true,
+  "dependencies": {
+    "../evil": "^1.0.0",
+    "ok-pkg": "^1.0.0"
+  }
+}

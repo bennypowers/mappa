@@ -4,8 +4,7 @@
   },
   "scopes": {
     "/node_modules/lit/": {
-      "@lit/reactive-element": "/node_modules/@lit/reactive-element/reactive-element.js",
-      "@lit/reactive-element/decorators/": "/node_modules/@lit/reactive-element/decorators/"
+      "@lit/reactive-element": "/node_modules/@lit/reactive-element/reactive-element.js"
     }
   }
 }

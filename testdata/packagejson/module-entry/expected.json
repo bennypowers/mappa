@@ -1,0 +1,7 @@
+{
+  "resolved": "dist/index.mjs",
+  "entries": [
+    {"key": "", "path": "dist/index.mjs"},
+    {"key": "/", "path": ""}
+  ]
+}

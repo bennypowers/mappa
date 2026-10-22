@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "blocked": null,
+    "blocked/": null,
+    "pkg/exact": "/pkg/exact.js",
+    "lit": "/node_modules/lit/index.js"
+  }
+}

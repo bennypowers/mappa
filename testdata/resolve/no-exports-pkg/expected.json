@@ -1,5 +1,6 @@
 {
   "imports": {
+    "broken-lib": "/node_modules/broken-lib/index.js",
     "broken-lib/": "/node_modules/broken-lib/"
   }
 }
