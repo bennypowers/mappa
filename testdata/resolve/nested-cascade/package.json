@@ -1,0 +1,4 @@
+{
+  "name": "app",
+  "dependencies": { "alpha": "^1.0.0", "shared-lib": "^2.0.0" }
+}

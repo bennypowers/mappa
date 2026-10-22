@@ -1,0 +1,12 @@
+{
+  "imports": {
+    "blocked": null,
+    "lit": "/node_modules/lit/index.js"
+  },
+  "scopes": {
+    "/node_modules/lit/": {
+      "blocked-subpath": null,
+      "lit-html": "/node_modules/lit-html/lit-html.js"
+    }
+  }
+}

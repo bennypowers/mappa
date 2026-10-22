@@ -19,6 +19,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package importmap
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -68,6 +69,14 @@ func (im *ImportMap) Validate() []*ValidationError {
 func validateSpecifierMap(imports map[string]string, scope string) []*ValidationError {
 	var errs []*ValidationError
 	for key, value := range imports {
+		if key == "" {
+			errs = append(errs, &ValidationError{
+				Key:     key,
+				Value:   value,
+				Scope:   scope,
+				Message: "specifier key must not be empty",
+			})
+		}
 		keySlash := strings.HasSuffix(key, "/")
 		valueSlash := strings.HasSuffix(value, "/")
 		if keySlash && !valueSlash {
@@ -120,6 +129,152 @@ type ImportMap struct {
 
 	// Integrity maps module URLs to their expected subresource integrity values.
 	Integrity map[string]string `json:"integrity,omitempty"`
+
+	// nullImports and nullScopes track keys whose value was JSON null. The
+	// spec allows null to block a specifier, but map[string]string cannot
+	// represent it; these side tables preserve it across round-trips.
+	nullImports map[string]bool
+	nullScopes  map[string]map[string]bool
+}
+
+// isJSONNull reports whether the raw JSON value is null.
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// UnmarshalJSON parses an import map, preserving null values.
+func (im *ImportMap) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Imports   map[string]json.RawMessage            `json:"imports"`
+		Scopes    map[string]map[string]json.RawMessage `json:"scopes"`
+		Integrity map[string]string                     `json:"integrity"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	im.Imports = nil
+	im.nullImports = nil
+	im.Scopes = nil
+	im.nullScopes = nil
+	im.Integrity = raw.Integrity
+
+	if raw.Imports != nil {
+		im.Imports = make(map[string]string, len(raw.Imports))
+		for key, value := range raw.Imports {
+			if isJSONNull(value) {
+				if im.nullImports == nil {
+					im.nullImports = make(map[string]bool)
+				}
+				im.nullImports[key] = true
+				continue
+			}
+			var s string
+			if err := json.Unmarshal(value, &s); err != nil {
+				return fmt.Errorf("imports[%q]: %w", key, err)
+			}
+			im.Imports[key] = s
+		}
+	}
+
+	if raw.Scopes != nil {
+		im.Scopes = make(map[string]map[string]string, len(raw.Scopes))
+		for scope, entries := range raw.Scopes {
+			im.Scopes[scope] = make(map[string]string, len(entries))
+			for key, value := range entries {
+				if isJSONNull(value) {
+					if im.nullScopes == nil {
+						im.nullScopes = make(map[string]map[string]bool)
+					}
+					if im.nullScopes[scope] == nil {
+						im.nullScopes[scope] = make(map[string]bool)
+					}
+					im.nullScopes[scope][key] = true
+					continue
+				}
+				var s string
+				if err := json.Unmarshal(value, &s); err != nil {
+					return fmt.Errorf("scopes[%q][%q]: %w", scope, key, err)
+				}
+				im.Scopes[scope][key] = s
+			}
+		}
+	}
+
+	return nil
+}
+
+// MarshalJSON serializes an import map, re-emitting null values.
+func (im *ImportMap) MarshalJSON() ([]byte, error) {
+	type output struct {
+		Imports   map[string]any            `json:"imports,omitempty"`
+		Scopes    map[string]map[string]any `json:"scopes,omitempty"`
+		Integrity map[string]string         `json:"integrity,omitempty"`
+	}
+
+	out := output{Integrity: im.Integrity}
+
+	if im.Imports != nil || len(im.nullImports) > 0 {
+		out.Imports = make(map[string]any, len(im.Imports)+len(im.nullImports))
+		for key, value := range im.Imports {
+			out.Imports[key] = value
+		}
+		for key := range im.nullImports {
+			if _, ok := out.Imports[key]; !ok {
+				out.Imports[key] = nil
+			}
+		}
+	}
+
+	if im.Scopes != nil || len(im.nullScopes) > 0 {
+		out.Scopes = make(map[string]map[string]any, len(im.Scopes)+len(im.nullScopes))
+		for scope, entries := range im.Scopes {
+			out.Scopes[scope] = make(map[string]any, len(entries))
+			for key, value := range entries {
+				out.Scopes[scope][key] = value
+			}
+		}
+		for scope, keys := range im.nullScopes {
+			if out.Scopes[scope] == nil {
+				out.Scopes[scope] = make(map[string]any)
+			}
+			for key := range keys {
+				if _, ok := out.Scopes[scope][key]; !ok {
+					out.Scopes[scope][key] = nil
+				}
+			}
+		}
+	}
+
+	return json.Marshal(out)
+}
+
+// Lookup resolves a bare specifier against this import map, honoring exact
+// entries and the longest matching trailing-slash key.
+func (im *ImportMap) Lookup(specifier string) (string, bool) {
+	if im == nil {
+		return "", false
+	}
+	if value, ok := im.Imports[specifier]; ok {
+		return value, true
+	}
+	var (
+		bestKey   string
+		bestValue string
+	)
+	for key, value := range im.Imports {
+		if !strings.HasSuffix(key, "/") || !strings.HasPrefix(specifier, key) {
+			continue
+		}
+		if len(key) > len(bestKey) {
+			bestKey = key
+			bestValue = value + specifier[len(key):]
+		}
+	}
+	if bestKey == "" {
+		return "", false
+	}
+	return bestValue, true
 }
 
 // Parse parses JSON data into an ImportMap.
@@ -154,6 +309,25 @@ func (im *ImportMap) Merge(other *ImportMap) *ImportMap {
 	maps.Copy(result.Imports, im.Imports)
 	maps.Copy(result.Imports, other.Imports)
 
+	// Merge nulls with other taking precedence.
+	for key := range im.nullImports {
+		if _, ok := other.Imports[key]; ok || other.nullImports[key] {
+			continue
+		}
+		if result.nullImports == nil {
+			result.nullImports = make(map[string]bool)
+		}
+		result.nullImports[key] = true
+		delete(result.Imports, key)
+	}
+	for key := range other.nullImports {
+		if result.nullImports == nil {
+			result.nullImports = make(map[string]bool)
+		}
+		result.nullImports[key] = true
+		delete(result.Imports, key)
+	}
+
 	// Copy base scopes
 	for scope, imports := range im.Scopes {
 		result.Scopes[scope] = make(map[string]string, len(imports))
@@ -165,6 +339,40 @@ func (im *ImportMap) Merge(other *ImportMap) *ImportMap {
 			result.Scopes[scope] = make(map[string]string, len(imports))
 		}
 		maps.Copy(result.Scopes[scope], imports)
+	}
+
+	// Merge null scope entries with other taking precedence.
+	for scope, keys := range im.nullScopes {
+		for key := range keys {
+			if other.Scopes[scope] != nil {
+				if _, ok := other.Scopes[scope][key]; ok {
+					continue
+				}
+			}
+			if other.nullScopes[scope][key] {
+				continue
+			}
+			if result.nullScopes == nil {
+				result.nullScopes = make(map[string]map[string]bool)
+			}
+			if result.nullScopes[scope] == nil {
+				result.nullScopes[scope] = make(map[string]bool)
+			}
+			result.nullScopes[scope][key] = true
+			delete(result.Scopes[scope], key)
+		}
+	}
+	for scope, keys := range other.nullScopes {
+		for key := range keys {
+			if result.nullScopes == nil {
+				result.nullScopes = make(map[string]map[string]bool)
+			}
+			if result.nullScopes[scope] == nil {
+				result.nullScopes[scope] = make(map[string]bool)
+			}
+			result.nullScopes[scope][key] = true
+			delete(result.Scopes[scope], key)
+		}
 	}
 
 	// Copy base integrity, then override with other's
@@ -209,6 +417,19 @@ func (im *ImportMap) Clone() *ImportMap {
 	if im.Integrity != nil {
 		result.Integrity = make(map[string]string, len(im.Integrity))
 		maps.Copy(result.Integrity, im.Integrity)
+	}
+
+	if len(im.nullImports) > 0 {
+		result.nullImports = make(map[string]bool, len(im.nullImports))
+		maps.Copy(result.nullImports, im.nullImports)
+	}
+
+	if len(im.nullScopes) > 0 {
+		result.nullScopes = make(map[string]map[string]bool, len(im.nullScopes))
+		for scope, keys := range im.nullScopes {
+			result.nullScopes[scope] = make(map[string]bool, len(keys))
+			maps.Copy(result.nullScopes[scope], keys)
+		}
 	}
 
 	return result
@@ -271,6 +492,19 @@ func (im *ImportMap) Simplify() *ImportMap {
 	if im.Integrity != nil {
 		result.Integrity = make(map[string]string, len(im.Integrity))
 		maps.Copy(result.Integrity, im.Integrity)
+	}
+
+	// Preserve explicit null entries.
+	if len(im.nullImports) > 0 {
+		result.nullImports = make(map[string]bool, len(im.nullImports))
+		maps.Copy(result.nullImports, im.nullImports)
+	}
+	if len(im.nullScopes) > 0 {
+		result.nullScopes = make(map[string]map[string]bool, len(im.nullScopes))
+		for scope, keys := range im.nullScopes {
+			result.nullScopes[scope] = make(map[string]bool, len(keys))
+			maps.Copy(result.nullScopes[scope], keys)
+		}
 	}
 
 	// Clean up empty maps
@@ -343,7 +577,8 @@ func simplifyImports(imports map[string]string) map[string]string {
 // ToJSON converts the import map to an indented JSON string.
 // Returns an empty string if the import map is nil or entirely empty.
 func (im *ImportMap) ToJSON() string {
-	if im == nil || (len(im.Imports) == 0 && len(im.Scopes) == 0 && len(im.Integrity) == 0) {
+	if im == nil || (len(im.Imports) == 0 && len(im.Scopes) == 0 && len(im.Integrity) == 0 &&
+		len(im.nullImports) == 0 && len(im.nullScopes) == 0) {
 		return ""
 	}
 
@@ -353,12 +588,6 @@ func (im *ImportMap) ToJSON() string {
 	}
 
 	return string(bytes)
-}
-
-// MarshalJSON implements json.Marshaler.
-func (im *ImportMap) MarshalJSON() ([]byte, error) {
-	type alias ImportMap
-	return json.Marshal((*alias)(im))
 }
 
 // ToHTML wraps the import map JSON in an HTML script tag.

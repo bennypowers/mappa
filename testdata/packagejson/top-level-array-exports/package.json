@@ -1,0 +1,8 @@
+{
+  "name": "array-entry",
+  "version": "1.0.0",
+  "exports": [
+    { "import": "./esm/index.js" },
+    "./fallback.js"
+  ]
+}

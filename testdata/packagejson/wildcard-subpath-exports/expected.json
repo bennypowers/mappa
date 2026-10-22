@@ -1,6 +1,8 @@
 {
   "entries": [
-    {"key": "", "path": "reactive-element.js"},
-    {"key": "/decorators/", "path": "decorators/"}
-  ]
+    {"key": "", "path": "reactive-element.js"}
+  ],
+  "resolutions": {
+    "./decorators/base": "decorators/base.js"
+  }
 }

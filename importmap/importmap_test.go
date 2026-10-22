@@ -448,3 +448,50 @@ func TestSimplifyEntries(t *testing.T) {
 		t.Error("unrelated key 'other' should be kept")
 	}
 }
+
+func TestNullValuesRoundTrip(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/null-values", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if _, ok := im.Imports["blocked"]; ok {
+		t.Error("null import value should not appear as a string entry")
+	}
+	if errs := im.Validate(); len(errs) != 0 {
+		t.Errorf("null values should be valid, got: %v", errs)
+	}
+
+	out, err := json.MarshalIndent(im, "", "  ")
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(out), `"blocked": null`) {
+		t.Errorf("expected null import to round-trip, got: %s", out)
+	}
+	if !strings.Contains(string(out), `"blocked-subpath": null`) {
+		t.Errorf("expected null scope entry to round-trip, got: %s", out)
+	}
+	if !strings.Contains(string(out), `"lit": "/node_modules/lit/index.js"`) {
+		t.Errorf("expected string import to round-trip, got: %s", out)
+	}
+}
+
+func TestValidateRejectsEmptyKey(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/empty-key", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if errs := im.Validate(); len(errs) == 0 {
+		t.Fatal("expected an error for an empty specifier key")
+	}
+}

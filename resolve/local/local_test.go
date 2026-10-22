@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -252,7 +251,7 @@ func TestResolverCacheReuse(t *testing.T) {
 	}
 }
 
-func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
+func TestResolverDefaultsToIndexJS(t *testing.T) {
 	mfs := testutil.NewFixtureFS(t, "resolve/no-exports-pkg", "/test")
 
 	logger := &mockLogger{}
@@ -262,18 +261,19 @@ func TestResolverWarnsOnNoExportsOrMain(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	// Should only have trailing slash mapping, not bare specifier
-	if _, ok := result.Imports["broken-lib"]; ok {
-		t.Error("Expected no bare specifier mapping for package without exports/main")
+	// Node falls back to index.js when neither exports nor main is present.
+	if got := result.Imports["broken-lib"]; got != "/node_modules/broken-lib/index.js" {
+		t.Errorf("Expected index.js fallback for bare specifier, got %q", got)
 	}
 	if result.Imports["broken-lib/"] != "/node_modules/broken-lib/" {
 		t.Errorf("Expected trailing slash mapping, got %v", result.Imports)
 	}
 
-	// Should have logged a warning
-	expectedWarning := "Package 'broken-lib' has no root export or main field; only subpath imports will work"
-	if !slices.Contains(logger.warnings, expectedWarning) {
-		t.Errorf("Expected warning %q, got warnings: %v", expectedWarning, logger.warnings)
+	// A root export now exists, so no warning should be logged.
+	for _, w := range logger.warnings {
+		if strings.Contains(w, "no root export or main field") {
+			t.Errorf("Unexpected warning: %q", w)
+		}
 	}
 }
 
@@ -614,7 +614,7 @@ func TestOptionsApplyPathBaseAndPackageDeps(t *testing.T) {
 	mfs := testutil.NewFixtureFS(t, "workspace-serve-root", "/test")
 
 	opts := &local.Options{
-		PathBase:   "/test/examples/kitchen-sink",
+		PathBase:    "/test/examples/kitchen-sink",
 		PackageDeps: "/test/examples/kitchen-sink",
 	}
 
@@ -726,5 +726,112 @@ func TestResolverWithPathBaseIncrementalIdempotent(t *testing.T) {
 	}
 	if incremental.ImportMap.Imports["lit"] != "/node_modules/lit/index.js" {
 		t.Errorf("Incremental lit wrong: %s", incremental.ImportMap.Imports["lit"])
+	}
+}
+
+func TestResolveSpecifiersWildcardTargetSuffix(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/wildcard-target-suffix", "/test")
+	resolver := local.New(mfs, nil)
+
+	full, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if _, ok := full.Imports["suffix-pkg/"]; ok {
+		t.Errorf("suffix-target wildcard must not be emitted as a trailing-slash key: %v", full.Imports)
+	}
+
+	got := resolver.ResolveSpecifiers("/test", []string{"suffix-pkg", "suffix-pkg/foo"})
+	if got["suffix-pkg"] != "/node_modules/suffix-pkg/index.js" {
+		t.Errorf("suffix-pkg = %q", got["suffix-pkg"])
+	}
+	if got["suffix-pkg/foo"] != "/node_modules/suffix-pkg/dist/foo.js" {
+		t.Errorf("suffix-pkg/foo = %q, want exact wildcard resolution", got["suffix-pkg/foo"])
+	}
+}
+
+func TestResolveNestedCascade(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/nested-cascade", "/test")
+	resolver := local.New(mfs, nil)
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if got := result.Scopes["/node_modules/alpha/node_modules/shared-lib/"]; got["helper"] != "/node_modules/helper/index.js" {
+		t.Errorf("nested scope should find hoisted helper, got scopes: %v", result.Scopes)
+	}
+	if got := result.Scopes["/node_modules/shared-lib/"]; got["helper"] != "/node_modules/helper/index.js" {
+		t.Errorf("hoisted scope should find helper, got scopes: %v", result.Scopes)
+	}
+	if _, ok := result.Imports["helper"]; ok {
+		t.Errorf("transitive helper must not be a top-level import: %v", result.Imports)
+	}
+}
+
+func TestResolveAdditionalPackageScopes(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/include-transitive", "/test")
+	resolver := local.New(mfs, nil).WithPackages([]string{"fuse.js"})
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if result.Imports["fuse.js"] != "/node_modules/fuse.js/fuse.js" {
+		t.Errorf("expected fuse.js import, got %v", result.Imports)
+	}
+	if got := result.Scopes["/node_modules/fuse.js/"]; got["leaf"] != "/node_modules/leaf/index.js" {
+		t.Errorf("expected leaf scope for included package, got scopes: %v", result.Scopes)
+	}
+}
+
+func TestResolveExcludesTransitiveScopes(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/include-transitive", "/test")
+	resolver := local.New(mfs, nil).WithPackages([]string{"fuse.js"}).WithExclude([]string{"leaf"})
+
+	result, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if _, ok := result.Scopes["/node_modules/fuse.js/"]["leaf"]; ok {
+		t.Errorf("excluded package must not appear in scopes: %v", result.Scopes)
+	}
+}
+
+func TestResolveNestedOfNested(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/nested-of-nested", "/test")
+	result, err := local.New(mfs, nil).Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	nestedScope := result.Scopes["/node_modules/alpha/node_modules/shared-lib/"]
+	want := "/node_modules/alpha/node_modules/shared-lib/node_modules/helper/index.js"
+	if nestedScope["helper"] != want {
+		t.Errorf("nested-of-nested helper = %q, want %q (scopes: %v)", nestedScope["helper"], want, result.Scopes)
+	}
+	if _, ok := result.Imports["helper"]; ok {
+		t.Errorf("transitive helper must not be a top-level import: %v", result.Imports)
+	}
+}
+
+func TestResolveDoesNotWalkAboveWorkspaceRoot(t *testing.T) {
+	mfs := mapfs.New()
+	mfs.AddFile("/test/package.json", `{"name": "root", "dependencies": {"parent": "1.0.0"}}`, 0644)
+	mfs.AddFile("/test/node_modules/parent/package.json",
+		`{"name": "parent", "version": "1.0.0", "main": "index.js", "dependencies": {"escapee": "1.0.0"}}`, 0644)
+	// A node_modules tree above the workspace root must not satisfy resolution:
+	// it cannot be served from the project and would escape the web root.
+	mfs.AddFile("/node_modules/escapee/package.json",
+		`{"name": "escapee", "version": "1.0.0", "main": "index.js"}`, 0644)
+
+	result, err := local.New(mfs, nil).Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	for scope, entries := range result.Scopes {
+		if _, ok := entries["escapee"]; ok {
+			t.Fatalf("scope %q resolved a dependency above the workspace root: %v", scope, entries)
+		}
 	}
 }

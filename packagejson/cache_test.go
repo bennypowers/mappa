@@ -17,6 +17,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package packagejson_test
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -210,5 +211,31 @@ func TestMemoryCacheInvalidateAllowsReload(t *testing.T) {
 	}
 	if loadCount.Load() != 2 {
 		t.Errorf("Expected 2 loads after invalidate, got %d", loadCount.Load())
+	}
+}
+
+func TestMemoryCacheRetriesAfterError(t *testing.T) {
+	cache := packagejson.NewMemoryCache()
+	wantErr := errors.New("transient")
+	var calls atomic.Int32
+	loader := func() (*packagejson.PackageJSON, error) {
+		if calls.Add(1) == 1 {
+			return nil, wantErr
+		}
+		return &packagejson.PackageJSON{Name: "ok"}, nil
+	}
+
+	if _, err := cache.GetOrLoad("/path/package.json", loader); !errors.Is(err, wantErr) {
+		t.Fatalf("expected first load to fail, got %v", err)
+	}
+	pkg, err := cache.GetOrLoad("/path/package.json", loader)
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if pkg.Name != "ok" {
+		t.Errorf("unexpected package %+v", pkg)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 loader calls, got %d", calls.Load())
 	}
 }

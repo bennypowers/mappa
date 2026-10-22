@@ -230,3 +230,31 @@ func TestDependencyGraphRemovePackage(t *testing.T) {
 		t.Errorf("Expected C to no longer have B as dependent, got %v", deps)
 	}
 }
+
+func TestResolveIncrementalMatchesFullForTransitive(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/with-scopes", "/test")
+	resolver := local.New(mfs, nil)
+
+	full, err := resolver.Resolve("/test")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+	inc, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"@lit/reactive-element"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+	if !reflect.DeepEqual(full.Imports, inc.ImportMap.Imports) {
+		t.Errorf("incremental imports diverge from full:\n full: %v\n inc:  %v", full.Imports, inc.ImportMap.Imports)
+	}
+	if !reflect.DeepEqual(full.Scopes, inc.ImportMap.Scopes) {
+		t.Errorf("incremental scopes diverge from full:\n full: %v\n inc:  %v", full.Scopes, inc.ImportMap.Scopes)
+	}
+}

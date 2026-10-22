@@ -84,9 +84,11 @@ func (c *MemoryCache) Invalidate(path string) {
 // GetOrLoad atomically retrieves from cache or loads using the provided function.
 // Only one goroutine will execute the loader for a given path; others wait for the result.
 func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)) (*PackageJSON, error) {
-	// Fast path: check if already cached
+	// Fast path: check if already cached. A nil value is a negative-cache
+	// marker from a caller that only needs lookups; GetOrLoad must still run
+	// the loader so callers receive a proper error or fresh data.
 	c.mu.RLock()
-	if pkg, ok := c.cache[path]; ok {
+	if pkg, ok := c.cache[path]; ok && pkg != nil {
 		c.mu.RUnlock()
 		return pkg, nil
 	}
@@ -100,16 +102,21 @@ func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)
 	entry.once.Do(func() {
 		entry.pkg, entry.err = loader()
 		if entry.err == nil {
-			c.mu.Lock()
-			c.cache[path] = entry.pkg
-			c.mu.Unlock()
+			// Skip storing if Invalidate (or a newer load) replaced this entry.
+			if current, ok := c.loading.Load(path); ok && current == entry {
+				c.mu.Lock()
+				c.cache[path] = entry.pkg
+				c.mu.Unlock()
+			}
 		}
 	})
 
-	// Note: We don't delete from c.loading here because it would race with
-	// concurrent LoadOrStore calls. Entries remain until Invalidate is called.
-	// This is acceptable: entries are small (sync.Once + pointers) and bounded
-	// by unique paths. Invalidate clears both maps for proper cache refresh.
+	// Do not cache failures: a transient read error must be retryable.
+	// Delete only if this entry is still the current one, so an Invalidate
+	// followed by a fresh load is not clobbered.
+	if entry.err != nil {
+		c.loading.CompareAndDelete(path, entry)
+	}
 
 	return entry.pkg, entry.err
 }
