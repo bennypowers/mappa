@@ -18,7 +18,9 @@ npm/node_modules/
 npm/README.md
 npm/LICENSE
 
+# Legacy local release notes draft, superseded by docs/releases/
 RELEASE_NOTES.md
+docs/releases/
 
 # Test binary, built with `go test -c`
 *.test

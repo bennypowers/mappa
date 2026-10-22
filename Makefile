@@ -1,7 +1,7 @@
-.PHONY: all test lint clean install
+.PHONY: all test lint lint-shell clean install
 .PHONY: linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64
 .PHONY: wasm wasm-release wasm-serve
-.PHONY: release patch minor major
+.PHONY: notes release patch minor major test-scripts
 
 BINARY_NAME := mappa
 DIST_DIR := dist/bin
@@ -37,6 +37,17 @@ test:
 lint:
 	go vet ./...
 	golangci-lint run
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck -x scripts/release.sh scripts/notes.sh scripts/lib/*.sh scripts/release-notes/*.sh; \
+	else \
+		echo "shellcheck not installed; skipping shell lint"; \
+	fi
+
+lint-shell:
+	shellcheck -x scripts/release.sh scripts/notes.sh scripts/lib/*.sh scripts/release-notes/*.sh
+
+test-scripts:
+	@./scripts/release-notes/test.sh
 
 # Cross-compilation targets for go-release-workflows
 # Requires CGO for tree-sitter bindings
@@ -122,15 +133,29 @@ v%:
 patch minor major:
 	@:
 
+## Release notes (generates an untracked draft in docs/releases/, opens $EDITOR)
+notes:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Error: VERSION or bump type is required" >&2; \
+		echo "Usage: make notes <vX.Y.Z|patch|minor|major>" >&2; \
+		echo "  make notes v0.0.4   - Notes for an explicit version" >&2; \
+		echo "  make notes patch    - Notes for the next patch version" >&2; \
+		echo "  Versions must be v-prefixed." >&2; \
+		echo "  Set RELEASE_NOTES_NO_EDIT=1 to skip the editor." >&2; \
+		exit 1; \
+	fi
+	@./scripts/notes.sh '$(VERSION)'
+
 ## Release (creates version commit, pushes it, then uses gh to tag and create release)
 release:
 	@if [ -z "$(VERSION)" ]; then \
 		echo "Error: VERSION or bump type is required"; \
-		echo "Usage: make release <version|patch|minor|major>"; \
+		echo "Usage: make release <vX.Y.Z|patch|minor|major>"; \
 		echo "  make release v0.0.4   - Release explicit version"; \
 		echo "  make release patch    - Bump patch version (0.0.x)"; \
 		echo "  make release minor    - Bump minor version (0.x.0)"; \
 		echo "  make release major    - Bump major version (x.0.0)"; \
+		echo "  Versions must be v-prefixed."; \
 		exit 1; \
 	fi
-	@./scripts/release.sh $(VERSION)
+	@./scripts/release.sh '$(VERSION)'
