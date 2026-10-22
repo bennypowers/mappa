@@ -1,0 +1,8 @@
+{
+  "name": "workspace-direct-root",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "root-dep": "^1.0.0"
+  }
+}

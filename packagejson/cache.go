@@ -48,13 +48,14 @@ type cacheEntry struct {
 type MemoryCache struct {
 	mu      sync.RWMutex
 	cache   map[string]*PackageJSON
-	loading sync.Map // map[string]*cacheEntry for in-flight loads
+	loading map[string]*cacheEntry // in-flight loads
 }
 
 // NewMemoryCache creates a new in-memory cache for package.json files.
 func NewMemoryCache() *MemoryCache {
 	return &MemoryCache{
-		cache: make(map[string]*PackageJSON),
+		cache:   make(map[string]*PackageJSON),
+		loading: make(map[string]*cacheEntry),
 	}
 }
 
@@ -76,9 +77,9 @@ func (c *MemoryCache) Set(path string, pkg *PackageJSON) {
 // Invalidate removes a cached entry and any in-flight loading state.
 func (c *MemoryCache) Invalidate(path string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.cache, path)
-	c.mu.Unlock()
-	c.loading.Delete(path)
+	delete(c.loading, path)
 }
 
 // GetOrLoad atomically retrieves from cache or loads using the provided function.
@@ -87,36 +88,39 @@ func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)
 	// Fast path: check if already cached. A nil value is a negative-cache
 	// marker from a caller that only needs lookups; GetOrLoad must still run
 	// the loader so callers receive a proper error or fresh data.
-	c.mu.RLock()
+	c.mu.Lock()
 	if pkg, ok := c.cache[path]; ok && pkg != nil {
-		c.mu.RUnlock()
+		c.mu.Unlock()
 		return pkg, nil
 	}
-	c.mu.RUnlock()
+	entry, ok := c.loading[path]
+	if !ok {
+		entry = &cacheEntry{}
+		c.loading[path] = entry
+	}
+	c.mu.Unlock()
 
-	// Get or create an entry for this path - all concurrent goroutines get the same entry
-	actual, _ := c.loading.LoadOrStore(path, &cacheEntry{})
-	entry := actual.(*cacheEntry)
-
-	// Only one goroutine executes the loader; others block until once.Do completes
+	// Only one goroutine executes the loader; others block until once.Do completes.
 	entry.once.Do(func() {
 		entry.pkg, entry.err = loader()
-		if entry.err == nil {
+		if entry.err == nil && entry.pkg != nil {
+			c.mu.Lock()
 			// Skip storing if Invalidate (or a newer load) replaced this entry.
-			if current, ok := c.loading.Load(path); ok && current == entry {
-				c.mu.Lock()
+			if c.loading[path] == entry {
 				c.cache[path] = entry.pkg
-				c.mu.Unlock()
 			}
+			c.mu.Unlock()
 		}
 	})
 
-	// Do not cache failures: a transient read error must be retryable.
+	// Do not cache failures or successful nil loads: both must be retryable.
 	// Delete only if this entry is still the current one, so an Invalidate
 	// followed by a fresh load is not clobbered.
-	if entry.err != nil {
-		c.loading.CompareAndDelete(path, entry)
+	c.mu.Lock()
+	if c.loading[path] == entry && (entry.err != nil || entry.pkg == nil) {
+		delete(c.loading, path)
 	}
+	c.mu.Unlock()
 
 	return entry.pkg, entry.err
 }

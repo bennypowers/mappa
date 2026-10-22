@@ -239,3 +239,29 @@ func TestMemoryCacheRetriesAfterError(t *testing.T) {
 		t.Errorf("expected 2 loader calls, got %d", calls.Load())
 	}
 }
+
+func TestMemoryCacheRetriesAfterNilSuccess(t *testing.T) {
+	cache := packagejson.NewMemoryCache()
+	var calls atomic.Int32
+	loader := func() (*packagejson.PackageJSON, error) {
+		if calls.Add(1) == 1 {
+			return nil, nil
+		}
+		return &packagejson.PackageJSON{Name: "ok"}, nil
+	}
+
+	pkg, err := cache.GetOrLoad("/path/package.json", loader)
+	if err != nil || pkg != nil {
+		t.Fatalf("expected a nil result from the first load, got %+v, %v", pkg, err)
+	}
+	pkg, err = cache.GetOrLoad("/path/package.json", loader)
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if pkg == nil || pkg.Name != "ok" {
+		t.Errorf("unexpected package %+v", pkg)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 loader calls, got %d", calls.Load())
+	}
+}

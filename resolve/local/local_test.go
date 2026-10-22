@@ -835,3 +835,39 @@ func TestResolveDoesNotWalkAboveWorkspaceRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveIgnoresInvalidDependencyNames(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/invalid-dep-name", "/test")
+
+	resolver := local.New(mfs, nil)
+	result, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+
+	if got := result.ImportMap.Imports["ok-pkg"]; got != "/node_modules/ok-pkg/index.js" {
+		t.Errorf("ok-pkg import = %q, want /node_modules/ok-pkg/index.js", got)
+	}
+	for key, value := range result.ImportMap.Imports {
+		if strings.Contains(key, "evil") || strings.Contains(key, "escape") {
+			t.Errorf("invalid dependency leaked into imports: %q -> %q", key, value)
+		}
+		if strings.Contains(value, "..") {
+			t.Errorf("import %q escapes the web root: %q", key, value)
+		}
+	}
+	for _, scope := range result.ImportMap.Scopes {
+		for key := range scope {
+			if strings.Contains(key, "evil") || strings.Contains(key, "escape") {
+				t.Errorf("invalid dependency leaked into scopes: %q", key)
+			}
+		}
+	}
+	if result.DependencyGraph != nil {
+		for _, name := range []string{"../evil", "../../escape"} {
+			if deps := result.DependencyGraph.Dependents(name); len(deps) > 0 {
+				t.Errorf("invalid dependency %q was added to the graph with dependents %v", name, deps)
+			}
+		}
+	}
+}

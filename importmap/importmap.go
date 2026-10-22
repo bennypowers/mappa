@@ -53,8 +53,11 @@ func (im *ImportMap) Validate() []*ValidationError {
 	}
 
 	var errs []*ValidationError
+	errs = append(errs, validateNullSpecifierKeys(im.nullImports, "")...)
 	errs = append(errs, validateSpecifierMap(im.Imports, "")...)
+	validatedScopes := make(map[string]bool, len(im.Scopes)+len(im.nullScopes))
 	for scope, imports := range im.Scopes {
+		validatedScopes[scope] = true
 		if !isValidSpecifierValue(scope) {
 			errs = append(errs, &ValidationError{
 				Scope:   scope,
@@ -62,6 +65,31 @@ func (im *ImportMap) Validate() []*ValidationError {
 			})
 		}
 		errs = append(errs, validateSpecifierMap(imports, scope)...)
+	}
+	for scope, keys := range im.nullScopes {
+		if !validatedScopes[scope] && !isValidSpecifierValue(scope) {
+			errs = append(errs, &ValidationError{
+				Scope:   scope,
+				Message: "scope key must be a valid URL or start with /, ./, or ../",
+			})
+		}
+		errs = append(errs, validateNullSpecifierKeys(keys, scope)...)
+	}
+	return errs
+}
+
+// validateNullSpecifierKeys applies key validation to null-valued entries,
+// which live in side tables because map[string]string cannot represent them.
+func validateNullSpecifierKeys(keys map[string]bool, scope string) []*ValidationError {
+	var errs []*ValidationError
+	for key := range keys {
+		if key == "" {
+			errs = append(errs, &ValidationError{
+				Key:     key,
+				Scope:   scope,
+				Message: "specifier key must not be empty",
+			})
+		}
 	}
 	return errs
 }
@@ -250,9 +278,13 @@ func (im *ImportMap) MarshalJSON() ([]byte, error) {
 }
 
 // Lookup resolves a bare specifier against this import map, honoring exact
-// entries and the longest matching trailing-slash key.
+// entries and the longest matching trailing-slash key. A null entry blocks the
+// specifier, so a matching null key reports no resolution.
 func (im *ImportMap) Lookup(specifier string) (string, bool) {
 	if im == nil {
+		return "", false
+	}
+	if im.nullImports[specifier] {
 		return "", false
 	}
 	if value, ok := im.Imports[specifier]; ok {
@@ -261,6 +293,7 @@ func (im *ImportMap) Lookup(specifier string) (string, bool) {
 	var (
 		bestKey   string
 		bestValue string
+		bestNull  bool
 	)
 	for key, value := range im.Imports {
 		if !strings.HasSuffix(key, "/") || !strings.HasPrefix(specifier, key) {
@@ -269,9 +302,20 @@ func (im *ImportMap) Lookup(specifier string) (string, bool) {
 		if len(key) > len(bestKey) {
 			bestKey = key
 			bestValue = value + specifier[len(key):]
+			bestNull = false
 		}
 	}
-	if bestKey == "" {
+	for key := range im.nullImports {
+		if !strings.HasSuffix(key, "/") || !strings.HasPrefix(specifier, key) {
+			continue
+		}
+		if len(key) > len(bestKey) {
+			bestKey = key
+			bestValue = ""
+			bestNull = true
+		}
+	}
+	if bestKey == "" || bestNull {
 		return "", false
 	}
 	return bestValue, true

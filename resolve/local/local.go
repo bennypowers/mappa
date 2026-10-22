@@ -424,12 +424,15 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	// Collect all packages to process: dependencies + additional packages
 	packagesToProcess := make(map[string]bool)
 	for depName := range rootPkg.Dependencies {
-		packagesToProcess[depName] = true
+		if validPackageName(depName) {
+			packagesToProcess[depName] = true
+		}
 	}
 	for _, pkg := range r.additionalPackages {
 		// Parse package spec (may include subpath like "lit/decorators.js")
-		pkgName := parsePackageName(pkg)
-		packagesToProcess[pkgName] = true
+		if pkgName := parsePackageName(pkg); validPackageName(pkgName) {
+			packagesToProcess[pkgName] = true
+		}
 	}
 
 	// Remove excluded packages
@@ -513,7 +516,7 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		if slices.Contains(r.excludePackages, pkg.Name) {
 			continue
 		}
-		if err := r.addWorkspacePackageToImportMapWithGraph(result, pkg, rootDir, graph); err != nil {
+		if err := r.addWorkspacePackageToImportMap(result, pkg, rootDir); err != nil {
 			if r.logger != nil {
 				r.logger.Warning("Failed to add workspace package %s: %v", pkg.Name, err)
 			}
@@ -537,6 +540,9 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 			}
 		}
 		for depName := range pkgJSON.Dependencies {
+			if !validPackageName(depName) {
+				continue
+			}
 			if !workspaceNames[depName] {
 				allDeps[depName] = true
 				if graph != nil && ownerName != "" {
@@ -551,6 +557,9 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 				continue
 			}
 			for depName := range pkgJSON.Dependencies {
+				if !validPackageName(depName) {
+					continue
+				}
 				if !workspaceNames[depName] {
 					allDeps[depName] = true
 					if graph != nil {
@@ -563,8 +572,7 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 
 	// Include additional packages
 	for _, pkg := range r.additionalPackages {
-		pkgName := parsePackageName(pkg)
-		if !workspaceNames[pkgName] {
+		if pkgName := parsePackageName(pkg); validPackageName(pkgName) && !workspaceNames[pkgName] {
 			allDeps[pkgName] = true
 		}
 	}
@@ -637,9 +645,8 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 	return result, graph, nil
 }
 
-// addWorkspacePackageToImportMapWithGraph adds a workspace package's exports to the import map,
-// optionally tracking in the dependency graph.
-func (r *Resolver) addWorkspacePackageToImportMapWithGraph(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string, graph *resolve.DependencyGraph) error {
+// addWorkspacePackageToImportMap adds a workspace package's exports to the import map.
+func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg resolve.WorkspacePackage, rootDir string) error {
 	pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
 	if err != nil {
 		return err
@@ -724,10 +731,14 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 	// so both need transitive scopes.
 	packages := make(map[string]bool, len(rootPkg.Dependencies)+len(r.additionalPackages))
 	for depName := range rootPkg.Dependencies {
-		packages[depName] = true
+		if validPackageName(depName) {
+			packages[depName] = true
+		}
 	}
 	for _, pkg := range r.additionalPackages {
-		packages[parsePackageName(pkg)] = true
+		if pkgName := parsePackageName(pkg); validPackageName(pkgName) {
+			packages[pkgName] = true
+		}
 	}
 
 	for depName := range packages {
@@ -837,6 +848,9 @@ func (r *Resolver) processPackageAtPath(
 	opts := r.resolveOpts()
 
 	for depName := range allDeps {
+		if !validPackageName(depName) {
+			continue
+		}
 		// Track dependency relationship in graph
 		if graph != nil {
 			graph.AddDependency(pkgName, depName)
@@ -932,15 +946,20 @@ func parsePackageName(spec string) string {
 	return resolve.PackageName(spec)
 }
 
-// validPackageName rejects names that could escape node_modules.
+// validPackageName rejects names that could escape node_modules or name a
+// path. It accepts unscoped names and a single @scope/name separator.
 func validPackageName(name string) bool {
 	if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "/") {
 		return false
 	}
-	if strings.ContainsAny(name, "\\\x00") || strings.Contains(name, "..") {
+	if strings.ContainsAny(name, "\\:\x00") || strings.Contains(name, "..") {
 		return false
 	}
-	return true
+	if strings.HasPrefix(name, "@") {
+		scope, rest, ok := strings.Cut(name, "/")
+		return ok && len(scope) > 1 && rest != "" && !strings.Contains(rest, "/")
+	}
+	return !strings.Contains(name, "/")
 }
 
 // isWithinDir reports whether p resolves inside root.
@@ -1023,7 +1042,7 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 					newGraph.AddWorkspacePackage(name)
 					newGraph.SetPackagePath(name, pkgPath)
 					mu.Lock()
-					err := r.addWorkspacePackageToImportMapWithGraph(result, pkg, rootDir, newGraph)
+					err := r.addWorkspacePackageToImportMap(result, pkg, rootDir)
 					mu.Unlock()
 					if err != nil {
 						if r.logger != nil {
@@ -1105,13 +1124,40 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 // root dependencies plus any additional packages.
 func (r *Resolver) directPackageNames(rootDir string) map[string]bool {
 	names := make(map[string]bool)
-	if pkg, err := r.parsePackageJSON(filepath.Join(rootDir, "package.json")); err == nil {
+	add := func(pkg *packagejson.PackageJSON) {
 		for name := range pkg.Dependencies {
-			names[name] = true
+			if validPackageName(name) {
+				names[name] = true
+			}
 		}
 	}
+	workspaceNames := make(map[string]bool, len(r.workspacePackages))
+	for _, pkg := range r.workspacePackages {
+		workspaceNames[pkg.Name] = true
+	}
+	// Mirror Resolve: either a single package's dependencies, or those of every
+	// workspace package (the root manifest's deps are ignored in workspace
+	// mode), feed the top-level imports.
+	if r.packageDeps != "" {
+		if pkg, err := r.parsePackageJSON(filepath.Join(r.packageDeps, "package.json")); err == nil {
+			add(pkg)
+		}
+	} else if len(r.workspacePackages) > 0 {
+		for _, pkg := range r.workspacePackages {
+			if workspacePkg, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json")); err == nil {
+				add(workspacePkg)
+			}
+		}
+	} else if pkg, err := r.parsePackageJSON(filepath.Join(rootDir, "package.json")); err == nil {
+		add(pkg)
+	}
+	for name := range workspaceNames {
+		delete(names, name)
+	}
 	for _, pkg := range r.additionalPackages {
-		names[parsePackageName(pkg)] = true
+		if name := parsePackageName(pkg); validPackageName(name) && !workspaceNames[name] {
+			names[name] = true
+		}
 	}
 	for _, name := range r.excludePackages {
 		delete(names, name)

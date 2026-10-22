@@ -258,3 +258,39 @@ func TestResolveIncrementalMatchesFullForTransitive(t *testing.T) {
 		t.Errorf("incremental scopes diverge from full:\n full: %v\n inc:  %v", full.Scopes, inc.ImportMap.Scopes)
 	}
 }
+
+func TestResolveIncrementalIncludesWorkspaceDependencies(t *testing.T) {
+	// The root manifest declares only root-dep; lit is reachable through a
+	// workspace package. Incremental resolution must still treat it as a
+	// direct package rather than dropping it after a change.
+	mfs := testutil.NewFixtureFS(t, "resolve/workspace-direct-deps", "/test")
+
+	resolver := local.New(mfs, nil).WithWorkspacePackages([]resolve.WorkspacePackage{
+		{Name: "@scope/a", Path: "/test/packages/a"},
+	})
+
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("Initial ResolveWithGraph failed: %v", err)
+	}
+	wantLit, ok := initial.ImportMap.Imports["lit"]
+	if !ok {
+		t.Fatalf("expected lit in the initial map, got %v", initial.ImportMap.Imports)
+	}
+
+	result, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"lit"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	if got := result.ImportMap.Imports["lit"]; got != wantLit {
+		t.Errorf("lit import after incremental = %q, want %q", got, wantLit)
+	}
+	if got := result.ImportMap.Imports["@scope/a"]; got != "/packages/a/src/index.js" {
+		t.Errorf("@scope/a import after incremental = %q", got)
+	}
+}

@@ -495,3 +495,67 @@ func TestValidateRejectsEmptyKey(t *testing.T) {
 		t.Fatal("expected an error for an empty specifier key")
 	}
 }
+
+func TestValidateRejectsNullEmptyKey(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/null-key", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	errs := im.Validate()
+	var topLevel, scoped, badScope bool
+	for _, e := range errs {
+		switch {
+		case e.Key == "" && e.Scope == "":
+			topLevel = true
+		case e.Key == "" && e.Scope == "not-a-url":
+			scoped = true
+		}
+		if e.Scope == "not-a-url" && strings.Contains(e.Message, "scope key") {
+			badScope = true
+		}
+	}
+	if !topLevel {
+		t.Error("expected an error for the null empty top-level key")
+	}
+	if !scoped {
+		t.Error("expected an error for the null empty scoped key")
+	}
+	if !badScope {
+		t.Error("expected an error for the invalid null-only scope key")
+	}
+}
+
+func TestLookupHonorsNullEntries(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/null-trailing-slash", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	tests := []struct {
+		specifier string
+		want      string
+		wantOK    bool
+	}{
+		{"blocked", "", false},
+		{"blocked/deep.js", "", false},
+		{"pkg/exact", "/pkg/exact.js", true},
+		{"lit", "/node_modules/lit/index.js", true},
+	}
+	for _, tt := range tests {
+		got, ok := im.Lookup(tt.specifier)
+		if ok != tt.wantOK || got != tt.want {
+			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", tt.specifier, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
