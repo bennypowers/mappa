@@ -20,6 +20,7 @@ package cdn
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"bennypowers.dev/mappa/testutil"
@@ -139,6 +140,11 @@ func TestMatchVersion(t *testing.T) {
 		{"empty", "", "2.1.0"},
 		{"x-range major", "1.x", "1.2.0"},
 		{"x-range minor", "1.0.x", "1.0.1"},
+		{"x-range star suffix", "1.2.*", "1.2.0"},
+		{"partial major", "1", "1.2.0"},
+		{"partial minor", "1.1", "1.1.0"},
+		{"tilde major", "~1", "1.2.0"},
+		{"tilde minor", "~1.1", "1.1.0"},
 		{"hyphen range", "1.0.0 - 1.1.0", "1.1.0"},
 		{"or range", "^1.0.0 || ^2.0.0", "2.1.0"},
 	}
@@ -176,13 +182,19 @@ func TestMatchCaretRange(t *testing.T) {
 			"zero major zero minor",
 			[]string{"0.0.1", "0.0.2", "0.1.0"},
 			"0.0.1",
-			"0.0.2",
+			"0.0.1",
 		},
 		{
 			"zero major zero minor higher base",
 			[]string{"0.0.1", "0.0.2", "0.0.3", "0.1.0"},
 			"0.0.2",
-			"0.0.3",
+			"0.0.2",
+		},
+		{
+			"zero major zero minor without patch",
+			[]string{"0.0.1", "0.0.2", "0.1.0"},
+			"0.0",
+			"0.0.2",
 		},
 	}
 
@@ -279,5 +291,57 @@ func TestVersionCache(t *testing.T) {
 	}
 	if version != "3.1.0" {
 		t.Errorf("Expected version 3.1.0, got %s", version)
+	}
+}
+
+type countingFetcher struct {
+	Fetcher
+	count atomic.Int64
+}
+
+func (c *countingFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	c.count.Add(1)
+	return c.Fetcher.Fetch(ctx, url)
+}
+
+func TestResolveVersionSkipsRegistryForExactAndSeedsCache(t *testing.T) {
+	litRegistry := testutil.LoadFixtureFile(t, "lit_registry.json")
+	mock := NewMockFetcher()
+	mock.AddResponse("https://registry.npmjs.org/lit", litRegistry)
+	fetcher := &countingFetcher{Fetcher: mock}
+
+	registry := NewRegistry(fetcher)
+	ctx := context.Background()
+
+	// An exact version needs no registry metadata.
+	got, err := registry.ResolveVersion(ctx, "lit", "3.0.0")
+	if err != nil {
+		t.Fatalf("ResolveVersion exact failed: %v", err)
+	}
+	if got != "3.0.0" {
+		t.Errorf("ResolveVersion exact = %q", got)
+	}
+	if fetcher.count.Load() != 0 {
+		t.Errorf("expected no registry fetch for exact version, got %d", fetcher.count.Load())
+	}
+
+	// Resolving a range seeds the exact version too.
+	got, err = registry.ResolveVersion(ctx, "lit", "^2.0.0")
+	if err != nil {
+		t.Fatalf("ResolveVersion range failed: %v", err)
+	}
+	before := fetcher.count.Load()
+	if before != 1 {
+		t.Errorf("expected one registry fetch, got %d", before)
+	}
+	got, err = registry.ResolveVersion(ctx, "lit", got)
+	if err != nil {
+		t.Fatalf("ResolveVersion seeded exact failed: %v", err)
+	}
+	if got != "2.1.0" {
+		t.Errorf("ResolveVersion seeded exact = %q, want 2.1.0", got)
+	}
+	if fetcher.count.Load() != before {
+		t.Errorf("expected seeded cache hit, got %d fetches", fetcher.count.Load())
 	}
 }

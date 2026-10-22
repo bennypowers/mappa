@@ -149,6 +149,19 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 	c.mu.Unlock()
 
 	entry.load()
+	if entry.err != nil {
+		c.mu.Lock()
+		if current, ok := c.entries[key]; ok && current == entry {
+			delete(c.entries, key)
+			for i, k := range c.order {
+				if k == key {
+					c.order = append(c.order[:i], c.order[i+1:]...)
+					break
+				}
+			}
+		}
+		c.mu.Unlock()
+	}
 	return entry.pkg, entry.err
 }
 

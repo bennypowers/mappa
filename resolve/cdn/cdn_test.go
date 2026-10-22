@@ -31,10 +31,10 @@ import (
 
 // MockFetcher is a test implementation of the Fetcher interface.
 type MockFetcher struct {
-	responses    map[string][]byte
-	errors       map[string]error
-	delays       map[string]time.Duration
-	fetchCount   atomic.Int64
+	responses     map[string][]byte
+	errors        map[string]error
+	delays        map[string]time.Duration
+	fetchCount    atomic.Int64
 	maxConcurrent atomic.Int64
 	inflight      atomic.Int64
 }
@@ -487,16 +487,18 @@ func TestRequestTimeoutCancelsSlowFetch(t *testing.T) {
 	}
 
 	im, err := resolver.ResolvePackageJSON(ctx, pkg)
-	if err != nil {
-		t.Fatalf("ResolvePackageJSON error: %v", err)
+	if err == nil {
+		t.Fatal("Expected timeout to be reported as an error")
 	}
-
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Errorf("Expected deadline error, got: %v", err)
+	}
 	if im.Imports["slow-pkg"] != "" {
 		t.Error("Expected slow-pkg to be missing from imports due to timeout")
 	}
 }
 
-func TestRequestTimeoutDefaultIsNoTimeout(t *testing.T) {
+func TestDefaultRequestTimeoutAllowsFastFetch(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
 	litRegistry := testutil.LoadFixtureFile(t, "lit-registry/response.json")
@@ -547,8 +549,8 @@ func TestContextCancellationStopsSemAcquisition(t *testing.T) {
 	}
 
 	im, err := resolver.ResolvePackageJSON(ctx, pkg)
-	if err != nil {
-		t.Fatalf("ResolvePackageJSON error: %v", err)
+	if err == nil {
+		t.Fatal("Expected context cancellation to be reported as an error")
 	}
 
 	// With concurrency=1 and 100ms delay per dep, 50ms timeout should prevent
@@ -577,5 +579,58 @@ func TestWithConcurrencyIgnoresZero(t *testing.T) {
 	resolver := New(mockFetcher).WithConcurrency(0)
 	if resolver.concurrency != 10 {
 		t.Errorf("Expected concurrency to remain 10 for zero input, got %d", resolver.concurrency)
+	}
+}
+
+func TestTransitiveDepsOnlyInScopes(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	libARegistry := testutil.LoadFixtureFile(t, "lib-a-registry/response.json")
+	libAPackage := testutil.LoadFixtureFile(t, "lib-a-package/package.json")
+	libBRegistry := testutil.LoadFixtureFile(t, "lib-b-registry/response.json")
+	libBPackage := testutil.LoadFixtureFile(t, "lib-b-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-a", libARegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-a@1.0.0/package.json", libAPackage)
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-b", libBRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-b@1.0.0/package.json", libBPackage)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"lib-a": "^1.0.0"}}
+	im, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+	for key := range im.Imports {
+		if key == "lib-b" || strings.HasPrefix(key, "lib-b/") {
+			t.Errorf("transitive package must not appear in top-level imports: %q", key)
+		}
+	}
+	found := false
+	for _, scope := range im.Scopes {
+		if _, ok := scope["lib-b"]; ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected lib-b in a scope, got %v", im.Scopes)
+	}
+}
+
+func TestResolvePackageJSONReturnsErrors(t *testing.T) {
+	// Registry fetch for the declared dependency 404s.
+	mockFetcher := NewMockFetcher()
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"missing": "^1.0.0"}}
+
+	_, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an error for an unresolved declared dependency")
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("expected error to name the dependency, got: %v", err)
+	}
+}
+
+func TestDefaultRequestTimeout(t *testing.T) {
+	resolver := New(NewMockFetcher())
+	if resolver.requestTimeout != DefaultRequestTimeout {
+		t.Errorf("requestTimeout = %v, want %v", resolver.requestTimeout, DefaultRequestTimeout)
 	}
 }

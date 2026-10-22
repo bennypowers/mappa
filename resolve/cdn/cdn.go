@@ -20,6 +20,8 @@ package cdn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -34,14 +36,14 @@ import (
 
 // Resolver generates import maps pointing to CDN-hosted packages.
 type Resolver struct {
-	fetcher      mappacdn.Fetcher
-	provider     mappacdn.Provider
-	registry     *mappacdn.Registry
-	template     *resolve.Template
-	cache        *mappacdn.PackageCache
-	logger       resolve.Logger
-	conditions   []string
-	includeDev   bool
+	fetcher         mappacdn.Fetcher
+	provider        mappacdn.Provider
+	registry        *mappacdn.Registry
+	template        *resolve.Template
+	cache           *mappacdn.PackageCache
+	logger          resolve.Logger
+	conditions      []string
+	includeDev      bool
 	excludePackages []string
 	maxDepth        int           // Maximum dependency depth (0 = unlimited)
 	resolveScope    bool          // Whether to resolve transitive dependencies as scopes
@@ -49,17 +51,25 @@ type Resolver struct {
 	concurrency     int           // Max concurrent goroutines across all depths
 }
 
+// DefaultRequestTimeout bounds each registry and CDN request.
+const DefaultRequestTimeout = 30 * time.Second
+
+// maxDependencyEntries caps the number of dependencies accepted from a single
+// package.json, preventing unbounded fan-out from untrusted manifests.
+const maxDependencyEntries = 10000
+
 // New creates a new CDN resolver with default settings.
 func New(fetcher mappacdn.Fetcher) *Resolver {
 	tmpl, _ := resolve.ParseTemplate(mappacdn.DefaultProvider.ModuleTemplate)
 	return &Resolver{
-		fetcher:      fetcher,
-		provider:     mappacdn.DefaultProvider,
-		registry:     mappacdn.NewRegistry(fetcher),
-		template:     tmpl,
-		cache:        mappacdn.NewPackageCache(100),
-		resolveScope: true,
-		concurrency:  10,
+		fetcher:        fetcher,
+		provider:       mappacdn.DefaultProvider,
+		registry:       mappacdn.NewRegistry(fetcher),
+		template:       tmpl,
+		cache:          mappacdn.NewPackageCache(1000),
+		resolveScope:   true,
+		concurrency:    10,
+		requestTimeout: DefaultRequestTimeout,
 	}
 }
 
@@ -128,7 +138,7 @@ func (r *Resolver) WithExclude(packages []string) *Resolver {
 }
 
 // WithRequestTimeout returns a new Resolver with a per-request timeout.
-// 0 means no timeout (default). Applied to each HTTP fetch and registry call.
+// 0 disables the timeout. The default is DefaultRequestTimeout (30s).
 func (r *Resolver) WithRequestTimeout(d time.Duration) *Resolver {
 	c := r.clone()
 	c.requestTimeout = d
@@ -195,22 +205,44 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 		delete(deps, pkg)
 	}
 
-	// Resolve each dependency
+	if len(deps) > maxDependencyEntries {
+		return nil, fmt.Errorf("package.json declares %d dependencies (maximum %d)", len(deps), maxDependencyEntries)
+	}
+
+	// Resolve each dependency with a bounded worker pool. This prevents a
+	// hostile package.json from spawning one goroutine per dependency.
+	type dependency struct {
+		name         string
+		versionRange string
+	}
+	jobs := make(chan dependency, len(deps))
+	for name, versionRange := range deps {
+		jobs <- dependency{name, versionRange}
+	}
+	close(jobs)
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var resolveErrs []error
 	sem := make(chan struct{}, r.concurrency)
 	visited := sync.Map{}
 
-	for name, versionRange := range deps {
+	workers := min(r.concurrency, len(deps))
+	for range workers {
 		wg.Add(1)
-		go func(pkgName, verRange string) {
+		go func() {
 			defer wg.Done()
-			if err := r.resolvePackage(ctx, result, &mu, &visited, sem, pkgName, verRange, 0); err != nil {
-				if r.logger != nil {
-					r.logger.Warning("Failed to resolve %s@%s: %v", pkgName, verRange, err)
+			for dep := range jobs {
+				if err := r.resolvePackage(ctx, result, &mu, &visited, sem, dep.name, dep.versionRange, 0); err != nil {
+					if r.logger != nil {
+						r.logger.Warning("Failed to resolve %s@%s: %v", dep.name, dep.versionRange, err)
+					}
+					mu.Lock()
+					resolveErrs = append(resolveErrs, fmt.Errorf("%s@%s: %w", dep.name, dep.versionRange, err))
+					mu.Unlock()
 				}
 			}
-		}(name, versionRange)
+		}()
 	}
 	wg.Wait()
 
@@ -219,6 +251,9 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 		result.Scopes = nil
 	}
 
+	if len(resolveErrs) > 0 {
+		return result, errors.Join(resolveErrs...)
+	}
 	return result, nil
 }
 
@@ -250,7 +285,9 @@ func (r *Resolver) resolvePackage(
 	}
 
 	cacheKey := pkgName + "@" + version
-	if _, loaded := visited.LoadOrStore(cacheKey, true); loaded {
+	// Depth 0 must always add the declared dependency's top-level imports,
+	// even if a transitive scope already visited the same version.
+	if _, loaded := visited.LoadOrStore(cacheKey, true); loaded && depth > 0 {
 		<-sem
 		return nil
 	}
@@ -262,9 +299,14 @@ func (r *Resolver) resolvePackage(
 		return err
 	}
 
-	r.addPackageImports(im, mu, pkgName, version, pkg)
+	if depth == 0 {
+		r.addPackageImports(im, mu, pkgName, version, pkg)
+	}
 
 	if r.resolveScope && (r.maxDepth == 0 || depth < r.maxDepth) && len(pkg.Dependencies) > 0 {
+		if len(pkg.Dependencies) > maxDependencyEntries {
+			return fmt.Errorf("%s@%s declares %d dependencies (maximum %d)", pkgName, version, len(pkg.Dependencies), maxDependencyEntries)
+		}
 		scopeKey := r.template.Expand(pkgName, version, "")
 		if !strings.HasSuffix(scopeKey, "/") {
 			scopeKey += "/"

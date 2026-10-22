@@ -21,9 +21,13 @@ package cdn
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/tinywasm/fetch"
 )
+
+// maxResponseSize caps the size of a fetched response body (32 MiB).
+const maxResponseSize = 32 << 20
 
 // Fetcher provides an abstraction over HTTP fetching.
 type Fetcher interface {
@@ -51,7 +55,14 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 	}
 	done := make(chan result, 1)
 
-	fetch.Get(url).Send(func(resp *fetch.Response, err error) {
+	req := fetch.Get(url)
+	if deadline, ok := ctx.Deadline(); ok {
+		if ms := int(time.Until(deadline).Milliseconds()); ms > 0 {
+			req = req.Timeout(ms)
+		}
+	}
+
+	req.Send(func(resp *fetch.Response, err error) {
 		if err != nil {
 			done <- result{nil, &FetchError{URL: url, Message: err.Error()}}
 			return
@@ -64,7 +75,15 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 			}}
 			return
 		}
-		done <- result{resp.Body(), nil}
+		body := resp.Body()
+		if len(body) > maxResponseSize {
+			done <- result{nil, &FetchError{
+				URL:     url,
+				Message: fmt.Sprintf("response exceeds maximum size (%d bytes)", maxResponseSize),
+			}}
+			return
+		}
+		done <- result{body, nil}
 	})
 
 	select {

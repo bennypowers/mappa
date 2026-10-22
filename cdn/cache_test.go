@@ -20,6 +20,7 @@ package cdn
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"bennypowers.dev/mappa/packagejson"
@@ -165,5 +166,31 @@ func TestPackageCacheConcurrency(t *testing.T) {
 	}
 	if cache.Size() != 1 {
 		t.Errorf("Expected cache size 1, got %d", cache.Size())
+	}
+}
+
+func TestPackageCacheRetriesAfterError(t *testing.T) {
+	cache := NewPackageCache(10)
+	wantErr := errors.New("transient")
+	var calls atomic.Int32
+	loader := func() (*packagejson.PackageJSON, error) {
+		if calls.Add(1) == 1 {
+			return nil, wantErr
+		}
+		return &packagejson.PackageJSON{Name: "ok"}, nil
+	}
+
+	if _, err := cache.GetOrLoad("lit", "3.0.0", loader); !errors.Is(err, wantErr) {
+		t.Fatalf("expected first load to fail, got %v", err)
+	}
+	pkg, err := cache.GetOrLoad("lit", "3.0.0", loader)
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if pkg.Name != "ok" {
+		t.Errorf("unexpected package %+v", pkg)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 loader calls, got %d", calls.Load())
 	}
 }

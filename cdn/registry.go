@@ -38,8 +38,8 @@ type Registry struct {
 
 // RegistryPackage represents package metadata from the npm registry.
 type RegistryPackage struct {
-	Name     string                    `json:"name"`
-	DistTags map[string]string         `json:"dist-tags"`
+	Name     string                     `json:"name"`
+	DistTags map[string]string          `json:"dist-tags"`
 	Versions map[string]RegistryVersion `json:"versions"`
 }
 
@@ -139,6 +139,13 @@ func (r *Registry) ResolveVersion(ctx context.Context, pkgName, versionRange str
 		return cached, nil
 	}
 
+	// An exact version needs no registry lookup.
+	if isExactVersion(versionRange) {
+		exact := strings.TrimPrefix(strings.TrimSpace(versionRange), "v")
+		r.versionCache.Set(pkgName, versionRange, exact)
+		return exact, nil
+	}
+
 	// Fetch package metadata from registry
 	url := fmt.Sprintf("%s/%s", r.baseURL, pkgName)
 	data, err := r.fetcher.Fetch(ctx, url)
@@ -157,9 +164,22 @@ func (r *Registry) ResolveVersion(ctx context.Context, pkgName, versionRange str
 		return "", err
 	}
 
-	// Cache the result
+	// Cache both the range and the exact version so recursive calls that
+	// already have a concrete version don't refetch the packument.
 	r.versionCache.Set(pkgName, versionRange, resolved)
+	r.versionCache.Set(pkgName, resolved, resolved)
 	return resolved, nil
+}
+
+// exactVersionPattern matches complete semantic versions.
+var exactVersionPattern = regexp.MustCompile(`^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// partialVersionPattern matches "1" or "1.2" style x-ranges.
+var partialVersionPattern = regexp.MustCompile(`^v?\d+(?:\.\d+)?$`)
+
+// isExactVersion reports whether s is a complete, concrete semantic version.
+func isExactVersion(s string) bool {
+	return exactVersionPattern.MatchString(strings.TrimSpace(s))
 }
 
 // Dependencies returns the dependencies for a specific version of a package.
@@ -405,8 +425,11 @@ func matchVersion(versions []string, versionRange string) string {
 		return ""
 	}
 
-	// Handle x-ranges (1.x, 1.2.x)
-	if strings.Contains(versionRange, "x") || strings.Contains(versionRange, "X") {
+	// Handle x-ranges (1.x, 1.2.x, 1.2.*) and partial versions (1, 1.2)
+	if strings.ContainsAny(versionRange, "xX*") {
+		return matchXRange(versions, versionRange)
+	}
+	if partialVersionPattern.MatchString(versionRange) {
 		return matchXRange(versions, versionRange)
 	}
 
@@ -468,9 +491,14 @@ func matchCaretRange(versions []string, baseVersion string) string {
 			continue
 		}
 
-		// ^0.0.x - only matches 0.0.x
+		// ^0.0.x - only matches that exact patch (the left-most non-zero
+		// component may not change). ^0.0 (no patch) matches any 0.0.z.
 		if base.Major == 0 && base.Minor == 0 {
-			if sv.Major == 0 && sv.Minor == 0 && sv.Patch >= base.Patch {
+			if strings.Count(baseVersion, ".") >= 2 {
+				if sv.Major == 0 && sv.Minor == 0 && sv.Patch == base.Patch {
+					matches = append(matches, v)
+				}
+			} else if sv.Major == 0 && sv.Minor == 0 {
 				matches = append(matches, v)
 			}
 			continue
@@ -511,9 +539,16 @@ func matchTildeRange(versions []string, baseVersion string) string {
 			continue
 		}
 
-		// Must match major.minor, patch can be >=
-		if sv.Major == base.Major && sv.Minor == base.Minor && sv.Patch >= base.Patch {
-			matches = append(matches, v)
+		// Must match major (and minor, if specified), patch can be >=
+		switch strings.Count(baseVersion, ".") {
+		case 0: // ~1 -> >=1.0.0 <2.0.0
+			if sv.Major == base.Major {
+				matches = append(matches, v)
+			}
+		default:
+			if sv.Major == base.Major && sv.Minor == base.Minor && sv.Patch >= base.Patch {
+				matches = append(matches, v)
+			}
 		}
 	}
 
