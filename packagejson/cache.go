@@ -85,9 +85,9 @@ func (c *MemoryCache) Invalidate(path string) {
 // GetOrLoad atomically retrieves from cache or loads using the provided function.
 // Only one goroutine will execute the loader for a given path; others wait for the result.
 func (c *MemoryCache) GetOrLoad(path string, loader func() (*PackageJSON, error)) (*PackageJSON, error) {
-	// Fast path: check if already cached. A nil value is a negative-cache
-	// marker from a caller that only needs lookups; GetOrLoad must still run
-	// the loader so callers receive a proper error or fresh data.
+	// Fast path: check if already cached. The nil guard is defensive: Set may
+	// store a nil value, but GetOrLoad must still run the loader so callers get
+	// fresh data or a real error rather than a silent nil success.
 	c.mu.Lock()
 	if pkg, ok := c.cache[path]; ok && pkg != nil {
 		c.mu.Unlock()

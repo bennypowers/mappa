@@ -20,10 +20,12 @@ package importmap
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -75,6 +77,17 @@ func (im *ImportMap) Validate() []*ValidationError {
 		}
 		errs = append(errs, validateNullSpecifierKeys(keys, scope)...)
 	}
+	// Validation walks maps, whose iteration order is randomized. Sort so
+	// callers see a stable error sequence across calls.
+	slices.SortStableFunc(errs, func(a, b *ValidationError) int {
+		if c := cmp.Compare(a.Scope, b.Scope); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Key, b.Key); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Message, b.Message)
+	})
 	return errs
 }
 

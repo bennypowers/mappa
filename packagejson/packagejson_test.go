@@ -18,6 +18,7 @@ package packagejson_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"bennypowers.dev/mappa/packagejson"
@@ -858,10 +859,15 @@ func TestBareEntryFallbacks(t *testing.T) {
 			for _, e := range entries {
 				actual[e.Key] = e.Path
 			}
-			for _, want := range expected.Entries {
-				if actual[want.Key] != want.Path {
-					t.Errorf("entry %q = %q, want %q", want.Key, actual[want.Key], want.Path)
-				}
+			want := make(map[string]string, len(expected.Entries))
+			for _, e := range expected.Entries {
+				want[e.Key] = e.Path
+			}
+			if !reflect.DeepEqual(actual, want) {
+				t.Errorf("entries mismatch:\n  got:      %v\n  expected: %v", actual, want)
+			}
+			if len(entries) != len(expected.Entries) {
+				t.Errorf("entry count: got %d, want %d", len(entries), len(expected.Entries))
 			}
 		})
 	}
@@ -900,9 +906,14 @@ func TestTopLevelArrayExports(t *testing.T) {
 	for _, e := range entries {
 		actual[e.Key] = e.Path
 	}
-	for _, want := range expected.Entries {
-		if actual[want.Key] != want.Path {
-			t.Errorf("entry %q = %q, want %q", want.Key, actual[want.Key], want.Path)
-		}
+	want := make(map[string]string, len(expected.Entries))
+	for _, e := range expected.Entries {
+		want[e.Key] = e.Path
+	}
+	if !reflect.DeepEqual(actual, want) {
+		t.Errorf("entries mismatch:\n  got:      %v\n  expected: %v", actual, want)
+	}
+	if len(entries) != len(expected.Entries) {
+		t.Errorf("entry count: got %d, want %d", len(entries), len(expected.Entries))
 	}
 }

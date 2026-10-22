@@ -51,6 +51,33 @@ func (m *mockLogger) Debug(format string, args ...any) {
 	m.debugs = append(m.debugs, fmt.Sprintf(format, args...))
 }
 
+// assertImportMapGolden compares the full resolved import map against a
+// fixture golden, honoring the shared -update flag.
+func assertImportMapGolden(t *testing.T, actual *importmap.ImportMap, goldenPath string) {
+	t.Helper()
+
+	data, err := json.MarshalIndent(actual, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal import map: %v", err)
+	}
+	expectedData := testutil.LoadGoldenFile(t, goldenPath)
+	if expectedData == nil {
+		testutil.UpdateGoldenFile(t, goldenPath, append(data, '\n'))
+		return
+	}
+
+	var expected importmap.ImportMap
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse golden %s: %v", goldenPath, err)
+	}
+	if !reflect.DeepEqual(actual.Imports, expected.Imports) {
+		t.Errorf("Imports mismatch:\n  got:      %v\n  expected: %v", actual.Imports, expected.Imports)
+	}
+	if !reflect.DeepEqual(actual.Scopes, expected.Scopes) {
+		t.Errorf("Scopes mismatch:\n  got:      %v\n  expected: %v", actual.Scopes, expected.Scopes)
+	}
+}
+
 func TestResolver(t *testing.T) {
 	tests := []struct {
 		name string
@@ -312,6 +339,45 @@ func TestResolverAutoDiscoverWorkspaces(t *testing.T) {
 	if result.Imports["lit"] != expected.Imports["lit"] {
 		t.Errorf("lit import = %q, want %q", result.Imports["lit"], expected.Imports["lit"])
 	}
+}
+
+func TestResolveIncrementalAutoDiscoversWorkspaces(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/workspace-direct-deps", "/test")
+
+	// A fresh resolver has no explicit workspace packages; both the initial
+	// and incremental passes must auto-discover them from the root manifest.
+	resolver := local.New(mfs, nil)
+
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("ResolveWithGraph failed: %v", err)
+	}
+	if got := initial.ImportMap.Imports["lit"]; got != "/node_modules/lit/index.js" {
+		t.Fatalf("initial lit import = %q, want /node_modules/lit/index.js", got)
+	}
+	if got := initial.ImportMap.Imports["@scope/a"]; got != "/packages/a/src/index.js" {
+		t.Fatalf("initial @scope/a import = %q, want /packages/a/src/index.js", got)
+	}
+	assertImportMapGolden(t, initial.ImportMap, "resolve/workspace-direct-deps/expected.json")
+
+	incremental, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"lit"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	// lit is a direct dependency of the auto-discovered workspace package, so
+	// it must remain a top-level import after being re-resolved.
+	if got := incremental.ImportMap.Imports["lit"]; got != "/node_modules/lit/index.js" {
+		t.Errorf("incremental lit import = %q, want /node_modules/lit/index.js", got)
+	}
+	if got := incremental.ImportMap.Imports["@scope/a"]; got != "/packages/a/src/index.js" {
+		t.Errorf("incremental @scope/a import = %q, want /packages/a/src/index.js", got)
+	}
+	assertImportMapGolden(t, incremental.ImportMap, "resolve/workspace-direct-deps/expected.json")
 }
 
 func TestResolverWithExclude(t *testing.T) {
@@ -748,6 +814,25 @@ func TestResolveSpecifiersWildcardTargetSuffix(t *testing.T) {
 	if got["suffix-pkg/foo"] != "/node_modules/suffix-pkg/dist/foo.js" {
 		t.Errorf("suffix-pkg/foo = %q, want exact wildcard resolution", got["suffix-pkg/foo"])
 	}
+	assertImportMapGolden(t, full, "resolve/wildcard-target-suffix/expected.json")
+}
+
+func TestResolveSpecifiersBareEntryFallback(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "resolve/specifiers-module-main", "/test")
+
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+	var expected map[string]string
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	got := local.New(mfs, nil).ResolveSpecifiers("/test", []string{"dual-entry"})
+	if !reflect.DeepEqual(got, expected) {
+		t.Errorf("ResolveSpecifiers mismatch:\n  got:      %v\n  expected: %v", got, expected)
+	}
 }
 
 func TestResolveNestedCascade(t *testing.T) {
@@ -768,6 +853,7 @@ func TestResolveNestedCascade(t *testing.T) {
 	if _, ok := result.Imports["helper"]; ok {
 		t.Errorf("transitive helper must not be a top-level import: %v", result.Imports)
 	}
+	assertImportMapGolden(t, result, "resolve/nested-cascade/expected.json")
 }
 
 func TestResolveAdditionalPackageScopes(t *testing.T) {
@@ -784,6 +870,7 @@ func TestResolveAdditionalPackageScopes(t *testing.T) {
 	if got := result.Scopes["/node_modules/fuse.js/"]; got["leaf"] != "/node_modules/leaf/index.js" {
 		t.Errorf("expected leaf scope for included package, got scopes: %v", result.Scopes)
 	}
+	assertImportMapGolden(t, result, "resolve/include-transitive/expected.json")
 }
 
 func TestResolveExcludesTransitiveScopes(t *testing.T) {
@@ -813,17 +900,13 @@ func TestResolveNestedOfNested(t *testing.T) {
 	if _, ok := result.Imports["helper"]; ok {
 		t.Errorf("transitive helper must not be a top-level import: %v", result.Imports)
 	}
+	assertImportMapGolden(t, result, "resolve/nested-of-nested/expected.json")
 }
 
 func TestResolveDoesNotWalkAboveWorkspaceRoot(t *testing.T) {
-	mfs := mapfs.New()
-	mfs.AddFile("/test/package.json", `{"name": "root", "dependencies": {"parent": "1.0.0"}}`, 0644)
-	mfs.AddFile("/test/node_modules/parent/package.json",
-		`{"name": "parent", "version": "1.0.0", "main": "index.js", "dependencies": {"escapee": "1.0.0"}}`, 0644)
-	// A node_modules tree above the workspace root must not satisfy resolution:
-	// it cannot be served from the project and would escape the web root.
-	mfs.AddFile("/node_modules/escapee/package.json",
-		`{"name": "escapee", "version": "1.0.0", "main": "index.js"}`, 0644)
+	// The fixture is mounted at "/" so the node_modules tree above the
+	// workspace root (/test) is visible at /node_modules.
+	mfs := testutil.NewFixtureFS(t, "resolve/above-root-escape", "/")
 
 	result, err := local.New(mfs, nil).Resolve("/test")
 	if err != nil {
@@ -834,6 +917,50 @@ func TestResolveDoesNotWalkAboveWorkspaceRoot(t *testing.T) {
 			t.Fatalf("scope %q resolved a dependency above the workspace root: %v", scope, entries)
 		}
 	}
+}
+
+// synthesizedDependencyList returns n distinct, syntactically valid
+// dependencies as a JSON object body.
+func synthesizedDependencyList(n int) string {
+	entries := make([]string, n)
+	for i := range n {
+		entries[i] = fmt.Sprintf(`"pkg-%d":"1.0.0"`, i)
+	}
+	return strings.Join(entries, ",")
+}
+
+func TestResolveRejectsTooManyDependencies(t *testing.T) {
+	t.Run("root package", func(t *testing.T) {
+		mfs := mapfs.New()
+		mfs.AddFile("/test/package.json", `{"name":"root","private":true,"dependencies":{`+
+			synthesizedDependencyList(10001)+`}}`, 0644)
+
+		_, err := local.New(mfs, nil).Resolve("/test")
+		if err == nil {
+			t.Fatal("expected an error for a package declaring more than the dependency cap")
+		}
+		if !strings.Contains(err.Error(), "maximum 10000") {
+			t.Errorf("expected cap in error, got: %v", err)
+		}
+	})
+
+	t.Run("workspace package", func(t *testing.T) {
+		mfs := mapfs.New()
+		mfs.AddDir("/test/packages", 0755)
+		mfs.AddDir("/test/packages/a", 0755)
+		mfs.AddFile("/test/package.json",
+			`{"name":"root","private":true,"workspaces":["packages/*"]}`, 0644)
+		mfs.AddFile("/test/packages/a/package.json", `{"name":"@scope/a","private":true,"dependencies":{`+
+			synthesizedDependencyList(10001)+`}}`, 0644)
+
+		_, err := local.New(mfs, nil).Resolve("/test")
+		if err == nil {
+			t.Fatal("expected an error for a workspace declaring more than the dependency cap")
+		}
+		if !strings.Contains(err.Error(), "maximum 10000") {
+			t.Errorf("expected cap in error, got: %v", err)
+		}
+	})
 }
 
 func TestResolveIgnoresInvalidDependencyNames(t *testing.T) {
@@ -870,4 +997,5 @@ func TestResolveIgnoresInvalidDependencyNames(t *testing.T) {
 			}
 		}
 	}
+	assertImportMapGolden(t, result.ImportMap, "resolve/invalid-dep-name/expected.json")
 }

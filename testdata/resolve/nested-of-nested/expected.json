@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "alpha": "/node_modules/alpha/index.js"
+  },
+  "scopes": {
+    "/node_modules/alpha/": {
+      "shared-lib": "/node_modules/alpha/node_modules/shared-lib/index.js"
+    },
+    "/node_modules/alpha/node_modules/shared-lib/": {
+      "helper": "/node_modules/alpha/node_modules/shared-lib/node_modules/helper/index.js"
+    }
+  }
+}

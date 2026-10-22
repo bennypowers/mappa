@@ -49,6 +49,9 @@ type Resolver struct {
 	conditions         []string // export condition priority
 	pathBase           string
 	packageDeps        string
+	// excluded is the exclusion set derived from excludePackages once per
+	// resolution pass. It is read-only during concurrent traversal.
+	excluded map[string]bool
 }
 
 // New creates a new local Resolver.
@@ -167,12 +170,14 @@ func (r *Resolver) WithPackageDeps(dir string) *Resolver {
 }
 
 // normalizePathOptions returns a new Resolver with pathBase and packageDeps
-// resolved to absolute paths relative to rootDir.
+// resolved to absolute paths relative to rootDir, and the exclusion set built
+// once for the resolution pass.
 func (r *Resolver) normalizePathOptions(rootDir string) *Resolver {
-	if r.pathBase == "" && r.packageDeps == "" {
-		return r
-	}
 	normalized := *r
+	normalized.excluded = make(map[string]bool, len(r.excludePackages))
+	for _, pkg := range r.excludePackages {
+		normalized.excluded[pkg] = true
+	}
 	if normalized.pathBase != "" && !filepath.IsAbs(normalized.pathBase) {
 		normalized.pathBase = filepath.Join(rootDir, normalized.pathBase)
 	}
@@ -202,6 +207,9 @@ func (r *Resolver) parsePackageJSON(path string) (*packagejson.PackageJSON, erro
 }
 
 // Resolve generates an ImportMap for a project rooted at the given directory.
+// A manifest or workspace declaring more than maxDependencyEntries direct
+// dependencies is rejected with an error; transitive packages exceeding the
+// same cap have their scope skipped with a warning.
 func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	im, _, err := r.resolveInternal(rootDir, nil)
 	return im, err
@@ -327,13 +335,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 			// Fall back to direct subpath
 			if resolvedPath == "" {
 				if subpath == "." {
-					if pkg.Module != "" {
-						resolvedPath = strings.TrimPrefix(pkg.Module, "./")
-					} else if pkg.Main != "" {
-						resolvedPath = strings.TrimPrefix(pkg.Main, "./")
-					} else {
-						resolvedPath = "index.js"
-					}
+					resolvedPath = pkg.BareEntry()
 				} else {
 					resolvedPath = strings.TrimPrefix(subpath, "./")
 				}
@@ -352,6 +354,9 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 
 // ResolveWithGraph generates an ImportMap and builds a DependencyGraph.
 // Use this for the initial resolution when you plan to do incremental updates.
+// The same dependency cap as Resolve applies: top-level declarations above
+// maxDependencyEntries return an error, while oversized transitive packages
+// are skipped with a warning.
 func (r *Resolver) ResolveWithGraph(rootDir string) (*resolve.IncrementalResult, error) {
 	graph := resolve.NewDependencyGraph()
 	im, graph, err := r.resolveInternal(rootDir, graph)
@@ -422,23 +427,7 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	}
 
 	// Collect all packages to process: dependencies + additional packages
-	packagesToProcess := make(map[string]bool)
-	for depName := range rootPkg.Dependencies {
-		if validPackageName(depName) {
-			packagesToProcess[depName] = true
-		}
-	}
-	for _, pkg := range r.additionalPackages {
-		// Parse package spec (may include subpath like "lit/decorators.js")
-		if pkgName := parsePackageName(pkg); validPackageName(pkgName) {
-			packagesToProcess[pkgName] = true
-		}
-	}
-
-	// Remove excluded packages
-	for _, pkg := range r.excludePackages {
-		delete(packagesToProcess, pkg)
-	}
+	packagesToProcess, _ := r.directDependencyNames(rootDir, nil)
 
 	if len(packagesToProcess) > maxDependencyEntries {
 		return nil, graph, fmt.Errorf("package.json declares %d dependencies (maximum %d)", len(packagesToProcess), maxDependencyEntries)
@@ -475,7 +464,7 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	wg.Wait()
 
 	// Add scopes for transitive dependencies
-	if err := r.addTransitiveDependenciesWithGraph(result, workspaceRoot, rootPkg, graph); err != nil {
+	if err := r.addTransitiveDependenciesWithGraph(result, workspaceRoot, graph); err != nil {
 		if r.logger != nil {
 			r.logger.Warning("Failed to add transitive dependencies: %v", err)
 		}
@@ -501,10 +490,7 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		Scopes:  make(map[string]map[string]string),
 	}
 
-	// Build set of workspace package names (to exclude from node_modules resolution)
-	workspaceNames := make(map[string]bool)
 	for _, pkg := range r.workspacePackages {
-		workspaceNames[pkg.Name] = true
 		if graph != nil {
 			graph.AddWorkspacePackage(pkg.Name)
 			graph.SetPackagePath(pkg.Name, pkg.Path)
@@ -513,7 +499,7 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 
 	// 1. Add workspace packages to global imports
 	for _, pkg := range r.workspacePackages {
-		if slices.Contains(r.excludePackages, pkg.Name) {
+		if r.excluded[pkg.Name] {
 			continue
 		}
 		if err := r.addWorkspacePackageToImportMap(result, pkg, rootDir); err != nil {
@@ -524,62 +510,9 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 	}
 
 	// 2. Collect dependencies (excluding other workspace packages)
-	allDeps := make(map[string]bool)
-	if r.packageDeps != "" {
-		pkgJSON, err := r.parsePackageJSON(filepath.Join(r.packageDeps, "package.json"))
-		if err != nil {
-			return nil, graph, fmt.Errorf("package-deps %s: %w", r.packageDeps, err)
-		}
-		var ownerName string
-		if graph != nil {
-			for _, pkg := range r.workspacePackages {
-				if pkg.Path == r.packageDeps {
-					ownerName = pkg.Name
-					break
-				}
-			}
-		}
-		for depName := range pkgJSON.Dependencies {
-			if !validPackageName(depName) {
-				continue
-			}
-			if !workspaceNames[depName] {
-				allDeps[depName] = true
-				if graph != nil && ownerName != "" {
-					graph.AddDependency(ownerName, depName)
-				}
-			}
-		}
-	} else {
-		for _, pkg := range r.workspacePackages {
-			pkgJSON, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
-			if err != nil {
-				continue
-			}
-			for depName := range pkgJSON.Dependencies {
-				if !validPackageName(depName) {
-					continue
-				}
-				if !workspaceNames[depName] {
-					allDeps[depName] = true
-					if graph != nil {
-						graph.AddDependency(pkg.Name, depName)
-					}
-				}
-			}
-		}
-	}
-
-	// Include additional packages
-	for _, pkg := range r.additionalPackages {
-		if pkgName := parsePackageName(pkg); validPackageName(pkgName) && !workspaceNames[pkgName] {
-			allDeps[pkgName] = true
-		}
-	}
-
-	// Remove excluded packages
-	for _, pkg := range r.excludePackages {
-		delete(allDeps, pkg)
+	allDeps, err := r.directDependencyNames(rootDir, graph)
+	if err != nil {
+		return nil, graph, err
 	}
 
 	if len(allDeps) > maxDependencyEntries {
@@ -618,10 +551,10 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 	// 4. Add transitive dependency scopes (parallel)
 	visited := sync.Map{}
 	for depName := range allDeps {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			r.processPackageDependenciesParallelWithGraph(result, &mu, &visited, nodeModulesPath, name, rootDir, graph)
@@ -712,7 +645,7 @@ func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *s
 
 // addTransitiveDependenciesWithGraph adds scopes for packages that have their own dependencies,
 // optionally tracking in the dependency graph.
-func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, rootDir string, rootPkg *packagejson.PackageJSON, graph *resolve.DependencyGraph) error {
+func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, rootDir string, graph *resolve.DependencyGraph) error {
 	nodeModulesPath := filepath.Join(rootDir, "node_modules")
 
 	var (
@@ -722,33 +655,18 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 		sem     = make(chan struct{}, 10) // limit to 10 concurrent goroutines
 	)
 
-	excluded := make(map[string]bool, len(r.excludePackages))
-	for _, pkg := range r.excludePackages {
-		excluded[pkg] = true
-	}
-
 	// Direct dependencies and additional packages both get top-level imports,
 	// so both need transitive scopes.
-	packages := make(map[string]bool, len(rootPkg.Dependencies)+len(r.additionalPackages))
-	for depName := range rootPkg.Dependencies {
-		if validPackageName(depName) {
-			packages[depName] = true
-		}
-	}
-	for _, pkg := range r.additionalPackages {
-		if pkgName := parsePackageName(pkg); validPackageName(pkgName) {
-			packages[pkgName] = true
-		}
+	packages, err := r.directDependencyNames(rootDir, nil)
+	if err != nil {
+		return err
 	}
 
 	for depName := range packages {
-		if excluded[depName] {
-			continue
-		}
+		sem <- struct{}{} // acquire semaphore before spawning
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			sem <- struct{}{}        // acquire semaphore
 			defer func() { <-sem }() // release semaphore
 
 			r.processPackageDependenciesParallelWithGraph(im, &mu, &visited, nodeModulesPath, name, rootDir, graph)
@@ -794,27 +712,28 @@ func (r *Resolver) processPackageAtPath(
 		return
 	}
 
-	excluded := make(map[string]bool, len(r.excludePackages))
-	for _, name := range r.excludePackages {
-		excluded[name] = true
-	}
-
-	// Collect all deps that affect scope: regular + peer + optional
+	// Collect all deps that affect scope: regular + peer + optional. Apply the
+	// same name and exclusion filtering as the top-level dependency sites so
+	// the cap counts only entries that could actually be processed.
 	allDeps := make(map[string]bool)
-	for name := range pkg.Dependencies {
-		allDeps[name] = true
+	addDeps := func(deps map[string]string) {
+		for name := range deps {
+			if validPackageName(name) {
+				allDeps[name] = true
+			}
+		}
 	}
-	for name := range pkg.PeerDependencies {
-		allDeps[name] = true
-	}
-	for name := range pkg.OptionalDependencies {
-		allDeps[name] = true
+	addDeps(pkg.Dependencies)
+	addDeps(pkg.PeerDependencies)
+	addDeps(pkg.OptionalDependencies)
+	for name := range r.excluded {
+		delete(allDeps, name)
 	}
 	if len(allDeps) > maxDependencyEntries {
+		if r.logger != nil {
+			r.logger.Warning("Package %s declares %d dependencies (maximum %d); skipping its scope", pkgName, len(allDeps), maxDependencyEntries)
+		}
 		return
-	}
-	for name := range excluded {
-		delete(allDeps, name)
 	}
 
 	if len(allDeps) == 0 {
@@ -848,9 +767,6 @@ func (r *Resolver) processPackageAtPath(
 	opts := r.resolveOpts()
 
 	for depName := range allDeps {
-		if !validPackageName(depName) {
-			continue
-		}
 		// Track dependency relationship in graph
 		if graph != nil {
 			graph.AddDependency(pkgName, depName)
@@ -898,15 +814,21 @@ func (r *Resolver) processPackageAtPath(
 // version doesn't satisfy the constraint.
 // Returns the path and whether it was found outside the workspace root.
 func (r *Resolver) findDependencyPath(parentPkgPath, rootNodeModules, depName string) (string, bool) {
+	rootNodeModules = filepath.Clean(rootNodeModules)
 	rootCandidate := filepath.Join(rootNodeModules, depName)
 	// Never walk above the workspace root: anything found there cannot be
 	// served from the project and would produce URLs escaping the web root.
-	workspaceRoot := filepath.Dir(filepath.Clean(rootNodeModules))
+	workspaceRoot := filepath.Dir(rootNodeModules)
 	dir := filepath.Clean(parentPkgPath)
 	for isWithinDir(workspaceRoot, dir) {
-		candidate := filepath.Join(dir, "node_modules", depName)
-		if r.fs.Exists(candidate) {
-			return candidate, filepath.Clean(candidate) != filepath.Clean(rootCandidate)
+		// When dir is the root node_modules itself, the candidate would be a
+		// nonsensical node_modules/node_modules path. The root candidate is
+		// probed at the workspace root below instead.
+		if dir != rootNodeModules {
+			candidate := filepath.Join(dir, "node_modules", depName)
+			if r.fs.Exists(candidate) {
+				return candidate, filepath.Clean(candidate) != rootCandidate
+			}
 		}
 		if dir == workspaceRoot {
 			break
@@ -916,9 +838,6 @@ func (r *Resolver) findDependencyPath(parentPkgPath, rootNodeModules, depName st
 			break
 		}
 		dir = parent
-	}
-	if r.fs.Exists(rootCandidate) {
-		return rootCandidate, false
 	}
 	return "", false
 }
@@ -989,6 +908,19 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 
 	r = r.normalizePathOptions(rootDir)
 
+	// Mirror resolveInternal: when no workspace packages were configured,
+	// auto-discover them so direct dependency selection matches the initial
+	// resolution.
+	if len(r.workspacePackages) == 0 {
+		discovered, discoverErr := resolve.DiscoverWorkspacePackages(r.fs, rootDir)
+		if discoverErr != nil && r.logger != nil {
+			r.logger.Warning("Failed to discover workspace packages: %v", discoverErr)
+		}
+		if len(discovered) > 0 {
+			r = r.WithWorkspacePackages(discovered)
+		}
+	}
+
 	// Invalidate cache for changed packages
 	if r.cache != nil {
 		for _, pkgName := range update.ChangedPackages {
@@ -1018,20 +950,26 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 	var mu sync.Mutex
 	sem := make(chan struct{}, 10)
 
-	direct := r.directPackageNames(rootDir)
+	direct, err := r.directDependencyNames(rootDir, nil)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Warning("Failed to collect direct dependencies: %v", err)
+		}
+	}
 	// If the root manifest cannot be read, fall back to the previous graph's
 	// direct imports rather than dropping packages from the map.
 	if len(direct) == 0 {
+		direct = make(map[string]bool)
 		for name := range update.PreviousMap.Imports {
 			direct[parsePackageName(name)] = true
 		}
 	}
 
 	for _, pkgName := range affected {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			// Check if this is a workspace package
@@ -1089,10 +1027,10 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 	visited := sync.Map{}
 	for _, pkgName := range affected {
 		if !update.PreviousGraph.IsWorkspacePackage(pkgName) {
+			sem <- struct{}{}
 			wg.Add(1)
 			go func(name string) {
 				defer wg.Done()
-				sem <- struct{}{}
 				defer func() { <-sem }()
 
 				r.processPackageDependenciesParallelWithGraph(result, &mu, &visited, nodeModulesPath, name, rootDir, newGraph)
@@ -1120,40 +1058,61 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 	}, nil
 }
 
-// directPackageNames returns the packages that receive top-level imports:
-// root dependencies plus any additional packages.
-func (r *Resolver) directPackageNames(rootDir string) map[string]bool {
+// directDependencyNames returns the packages that receive top-level imports.
+// It is the single owner of direct-dependency selection: the packageDeps
+// manifest, all workspace manifests, or the root manifest; valid-name
+// filtering; workspace-name exclusion; additional packages; and exclusions.
+// When graph is non-nil, workspace dependency edges are recorded.
+func (r *Resolver) directDependencyNames(rootDir string, graph *resolve.DependencyGraph) (map[string]bool, error) {
 	names := make(map[string]bool)
-	add := func(pkg *packagejson.PackageJSON) {
-		for name := range pkg.Dependencies {
-			if validPackageName(name) {
-				names[name] = true
-			}
-		}
-	}
 	workspaceNames := make(map[string]bool, len(r.workspacePackages))
 	for _, pkg := range r.workspacePackages {
 		workspaceNames[pkg.Name] = true
 	}
-	// Mirror Resolve: either a single package's dependencies, or those of every
-	// workspace package (the root manifest's deps are ignored in workspace
-	// mode), feed the top-level imports.
-	if r.packageDeps != "" {
-		if pkg, err := r.parsePackageJSON(filepath.Join(r.packageDeps, "package.json")); err == nil {
-			add(pkg)
-		}
-	} else if len(r.workspacePackages) > 0 {
-		for _, pkg := range r.workspacePackages {
-			if workspacePkg, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json")); err == nil {
-				add(workspacePkg)
+
+	add := func(owner string, pkg *packagejson.PackageJSON) {
+		for name := range pkg.Dependencies {
+			if !validPackageName(name) || workspaceNames[name] {
+				continue
+			}
+			names[name] = true
+			if graph != nil && owner != "" {
+				graph.AddDependency(owner, name)
 			}
 		}
-	} else if pkg, err := r.parsePackageJSON(filepath.Join(rootDir, "package.json")); err == nil {
-		add(pkg)
 	}
-	for name := range workspaceNames {
-		delete(names, name)
+
+	switch {
+	case r.packageDeps != "":
+		pkg, err := r.parsePackageJSON(filepath.Join(r.packageDeps, "package.json"))
+		if err != nil {
+			return nil, fmt.Errorf("package-deps %s: %w", r.packageDeps, err)
+		}
+		var owner string
+		if graph != nil {
+			for _, pkg := range r.workspacePackages {
+				if pkg.Path == r.packageDeps {
+					owner = pkg.Name
+					break
+				}
+			}
+		}
+		add(owner, pkg)
+	case len(r.workspacePackages) > 0:
+		// The root manifest's dependencies are ignored in workspace mode.
+		for _, pkg := range r.workspacePackages {
+			workspacePkg, err := r.parsePackageJSON(filepath.Join(pkg.Path, "package.json"))
+			if err != nil {
+				continue
+			}
+			add(pkg.Name, workspacePkg)
+		}
+	default:
+		if pkg, err := r.parsePackageJSON(filepath.Join(rootDir, "package.json")); err == nil {
+			add("", pkg)
+		}
 	}
+
 	for _, pkg := range r.additionalPackages {
 		if name := parsePackageName(pkg); validPackageName(name) && !workspaceNames[name] {
 			names[name] = true
@@ -1162,7 +1121,7 @@ func (r *Resolver) directPackageNames(rootDir string) map[string]bool {
 	for _, name := range r.excludePackages {
 		delete(names, name)
 	}
-	return names
+	return names, nil
 }
 
 // computeAffectedPackages returns all packages that need to be re-resolved:

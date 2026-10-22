@@ -149,6 +149,51 @@ func TestMerge(t *testing.T) {
 	}
 }
 
+func TestMergeNullPrecedence(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/merge-null-precedence", "/test")
+
+	base := mustParseFixture(t, mfs, "/test/base.json")
+	override := mustParseFixture(t, mfs, "/test/override.json")
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	result := base.Merge(override)
+
+	// Compare the serialized form so that null entries, which live in side
+	// tables, are part of the assertion rather than silently disappearing.
+	actualData, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var actual, expected map[string]any
+	if err := json.Unmarshal(actualData, &actual); err != nil {
+		t.Fatalf("Failed to unmarshal actual: %v", err)
+	}
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to unmarshal expected: %v", err)
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Errorf("Merge null precedence mismatch:\n  got:      %s\n  expected: %s", actualData, expectedData)
+	}
+}
+
+func mustParseFixture(t *testing.T, mfs interface {
+	ReadFile(string) ([]byte, error)
+}, path string) *importmap.ImportMap {
+	t.Helper()
+	data, err := mfs.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %v", path, err)
+	}
+	im, err := importmap.Parse(data)
+	if err != nil {
+		t.Fatalf("Failed to parse %s: %v", path, err)
+	}
+	return im
+}
+
 func TestToJSON(t *testing.T) {
 	im := &importmap.ImportMap{
 		Imports: map[string]string{
@@ -331,6 +376,62 @@ func TestValidate(t *testing.T) {
 			t.Error("Expected error within /node_modules/lit/ scope")
 		}
 	})
+}
+
+func TestValidateOrdering(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/validate-order", "/test")
+
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	expectedData, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected []*importmap.ValidationError
+	if err := json.Unmarshal(expectedData, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
+
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	first := im.Validate()
+	if !reflect.DeepEqual(first, expected) {
+		t.Fatalf("Unexpected error sequence:\n  got:      %v\n  expected: %v", first, expected)
+	}
+
+	// Map iteration order is randomized, so repeated calls must still agree.
+	for i := 0; i < 25; i++ {
+		if got := im.Validate(); !reflect.DeepEqual(got, first) {
+			t.Fatalf("Validation order changed across calls:\n  first: %v\n  call %d: %v", first, i, got)
+		}
+	}
+}
+
+func TestParseRejectsNonStringValues(t *testing.T) {
+	for _, dir := range []string{
+		"invalid-value-number",
+		"invalid-value-boolean",
+		"invalid-value-object",
+	} {
+		t.Run(dir, func(t *testing.T) {
+			mfs := testutil.NewFixtureFS(t, "importmap/"+dir, "/test")
+
+			input, err := mfs.ReadFile("/test/input.json")
+			if err != nil {
+				t.Fatalf("Failed to read input.json: %v", err)
+			}
+
+			if _, err := importmap.Parse(input); err == nil {
+				t.Fatal("Expected Parse to reject a non-string import map value")
+			}
+		})
+	}
 }
 
 func TestValidationErrorString(t *testing.T) {
@@ -528,6 +629,39 @@ func TestValidateRejectsNullEmptyKey(t *testing.T) {
 	}
 	if !badScope {
 		t.Error("expected an error for the invalid null-only scope key")
+	}
+}
+
+func TestLookupLongestPrefixWinsAcrossNulls(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "importmap/lookup-precedence", "/test")
+	input, err := mfs.ReadFile("/test/input.json")
+	if err != nil {
+		t.Fatalf("Failed to read input.json: %v", err)
+	}
+	im, err := importmap.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	tests := []struct {
+		specifier string
+		want      string
+		wantOK    bool
+	}{
+		// A longer null prefix blocks a shorter string prefix.
+		{"foo/bar/deep.js", "", false},
+		// The shorter matching string prefix still resolves other subpaths.
+		{"foo/other.js", "/foo/other.js", true},
+		// A longer string prefix beats a shorter null prefix.
+		{"baz/qux/mod.js", "/baz/qux/mod.js", true},
+		// The shorter null prefix blocks everything else.
+		{"baz/other.js", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := im.Lookup(tt.specifier)
+		if ok != tt.wantOK || got != tt.want {
+			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", tt.specifier, got, ok, tt.want, tt.wantOK)
+		}
 	}
 }
 

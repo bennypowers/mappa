@@ -214,6 +214,47 @@ func TestMemoryCacheInvalidateAllowsReload(t *testing.T) {
 	}
 }
 
+func TestMemoryCacheInvalidateRacingInFlightLoad(t *testing.T) {
+	cache := packagejson.NewMemoryCache()
+	const path = "/path/package.json"
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	loader := func() (*packagejson.PackageJSON, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+			return &packagejson.PackageJSON{Name: "stale"}, nil
+		}
+		return &packagejson.PackageJSON{Name: "fresh"}, nil
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = cache.GetOrLoad(path, loader)
+	}()
+
+	<-started
+	cache.Invalidate(path)
+	close(release)
+	<-firstDone
+
+	// The invalidated load's result must not be cached; the next call must
+	// invoke the loader again and observe fresh data.
+	pkg, err := cache.GetOrLoad(path, loader)
+	if err != nil {
+		t.Fatalf("GetOrLoad after invalidate failed: %v", err)
+	}
+	if pkg == nil || pkg.Name != "fresh" {
+		t.Errorf("expected fresh package after invalidate, got %+v", pkg)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 loader calls, got %d", calls.Load())
+	}
+}
+
 func TestMemoryCacheRetriesAfterError(t *testing.T) {
 	cache := packagejson.NewMemoryCache()
 	wantErr := errors.New("transient")

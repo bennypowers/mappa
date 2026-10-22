@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "suffix-pkg": "/node_modules/suffix-pkg/index.js"
+  }
+}

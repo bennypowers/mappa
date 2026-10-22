@@ -1,0 +1,8 @@
+{
+  "imports": {
+    "foo/": "/foo/",
+    "foo/bar/": null,
+    "baz/": null,
+    "baz/qux/": "/baz/qux/"
+  }
+}

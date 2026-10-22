@@ -1,0 +1,7 @@
+{
+  "name": "specifiers-module-main",
+  "private": true,
+  "dependencies": {
+    "dual-entry": "^1.0.0"
+  }
+}
