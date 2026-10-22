@@ -974,6 +974,11 @@ func (r *Resolver) ResolveIncremental(rootDir string, update resolve.Incremental
 
 			// Check if this is a workspace package
 			if update.PreviousGraph.IsWorkspacePackage(name) {
+				// Excluded workspace packages never enter the import map, so
+				// re-adding one here would undo the exclusion.
+				if r.excluded[name] {
+					return
+				}
 				pkgPath := update.PreviousGraph.PackagePath(name)
 				if pkgPath != "" {
 					pkg := resolve.WorkspacePackage{Name: name, Path: pkgPath}

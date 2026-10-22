@@ -294,3 +294,33 @@ func TestResolveIncrementalIncludesWorkspaceDependencies(t *testing.T) {
 		t.Errorf("@scope/a import after incremental = %q", got)
 	}
 }
+
+func TestResolveIncrementalKeepsExcludedWorkspacePackagesOut(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "workspace", "/test")
+
+	resolver := local.New(mfs, nil).WithExclude([]string{"@myorg/components"})
+
+	initial, err := resolver.ResolveWithGraph("/test")
+	if err != nil {
+		t.Fatalf("Initial ResolveWithGraph failed: %v", err)
+	}
+	if _, ok := initial.ImportMap.Imports["@myorg/components"]; ok {
+		t.Fatalf("excluded package present in initial map: %v", initial.ImportMap.Imports)
+	}
+
+	result, err := resolver.ResolveIncremental("/test", resolve.IncrementalUpdate{
+		ChangedPackages: []string{"@myorg/components"},
+		PreviousMap:     initial.ImportMap,
+		PreviousGraph:   initial.DependencyGraph,
+	})
+	if err != nil {
+		t.Fatalf("ResolveIncremental failed: %v", err)
+	}
+
+	if _, ok := result.ImportMap.Imports["@myorg/components"]; ok {
+		t.Error("excluded workspace package was re-added by incremental resolution")
+	}
+	if got := result.ImportMap.Imports["@myorg/core"]; got != "/packages/core/src/index.js" {
+		t.Errorf("@myorg/core import after incremental = %q", got)
+	}
+}
