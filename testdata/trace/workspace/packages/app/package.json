@@ -1,0 +1,6 @@
+{
+  "name": "@ws/app",
+  "version": "1.0.0",
+  "exports": { ".": "./index.js" },
+  "dependencies": { "@ws/lib": "^1.0.0" }
+}

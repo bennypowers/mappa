@@ -50,6 +50,8 @@ type Options struct {
 	Parallel int
 	// DryRun prevents writing files when true.
 	DryRun bool
+	// Logger receives resolution warnings. If nil, warnings are discarded.
+	Logger resolve.Logger
 }
 
 // Result holds the result of injecting into a single file.
@@ -99,15 +101,17 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", pkgPath, pkgErr)
 		}
 
+		// One cache shared by the tracer and every per-file resolver.
+		pkgCache := packagejson.NewMemoryCache()
+
 		// Create shared tracer
-		tracer := trace.NewTracer(osfs, absRoot).WithNodeModules(nodeModulesPath)
+		tracer := trace.NewTracer(osfs, absRoot).WithPackageCache(pkgCache).WithLogger(opts.Logger).WithNodeModules(nodeModulesPath)
 		if pkg != nil && pkg.Name != "" {
 			tracer = tracer.WithSelfPackage(pkg, absRoot)
 		}
 
 		// Create shared base resolver
-		pkgCache := packagejson.NewMemoryCache()
-		baseResolver := local.New(osfs, nil).WithPackageCache(pkgCache)
+		baseResolver := local.New(osfs, opts.Logger).WithPackageCache(pkgCache)
 		baseResolver, err := baseResolver.WithTemplate(templateArg)
 		if err != nil {
 			for _, file := range files {
@@ -191,6 +195,12 @@ func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoo
 	// Simplify the merged import map
 	mergedMap = mergedMap.Simplify()
 
+	// Nothing to inject: leave the document untouched rather than writing an
+	// empty import map (an empty script body is not valid JSON).
+	if !hasEntries(mergedMap) {
+		return result
+	}
+
 	// Generate new HTML content
 	newContent, inserted, err := buildNewContent(content, loc, mergedMap)
 	if err != nil {
@@ -224,49 +234,7 @@ func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, bas
 		return nil, err
 	}
 
-	// Get bare specifiers
-	bareSpecs := graph.BareSpecifiers()
-	if len(bareSpecs) == 0 {
-		// No bare imports to resolve
-		return &importmap.ImportMap{
-			Imports: make(map[string]string),
-		}, nil
-	}
-
-	// Build resolver with traced packages for this file
-	resolver := baseResolver.WithPackages(bareSpecs)
-
-	// Include root package exports if traced specifiers reference the root package
-	if pkg != nil && pkg.Name != "" {
-		for _, spec := range bareSpecs {
-			if spec == pkg.Name || strings.HasPrefix(spec, pkg.Name+"/") {
-				resolver = resolver.WithIncludeRootExports()
-				break
-			}
-		}
-	}
-
-	// Generate full import map for scopes and trailing-slash keys
-	generatedMap, err := resolver.Resolve(workspaceRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	// Resolve traced specifiers
-	tracedImports := resolver.ResolveSpecifiers(workspaceRoot, bareSpecs)
-
-	// Add trailing-slash keys from generated imports
-	for key, value := range generatedMap.Imports {
-		if strings.HasSuffix(key, "/") {
-			tracedImports[key] = value
-		}
-	}
-
-	// Build and return the import map
-	return &importmap.ImportMap{
-		Imports: tracedImports,
-		Scopes:  generatedMap.Scopes,
-	}, nil
+	return trace.ResolveForSpecifiers(baseResolver, workspaceRoot, graph.BareSpecifiers(), pkg)
 }
 
 // indentLines prefixes each non-empty line in s with the given indent.
@@ -282,7 +250,8 @@ func indentLines(s, indent string) string {
 
 // buildNewContent generates new HTML content with the import map inserted or replaced.
 func buildNewContent(content []byte, loc trace.ImportMapLocation, im *importmap.ImportMap) ([]byte, bool, error) {
-	importMapJSON := im.ToJSON()
+	// Format("json") normalizes an empty map to "{}", which is valid JSON.
+	importMapJSON := im.Format("json")
 
 	if loc.Found {
 		// Replace existing import map content
@@ -325,6 +294,11 @@ func buildNewContent(content []byte, loc trace.ImportMapLocation, im *importmap.
 	newContent = append(newContent, content[insertPoint.Offset:]...)
 
 	return newContent, true, nil
+}
+
+// hasEntries reports whether the import map contains anything to write.
+func hasEntries(im *importmap.ImportMap) bool {
+	return im != nil && (len(im.Imports) > 0 || len(im.Scopes) > 0 || len(im.Integrity) > 0)
 }
 
 // extractIndent extracts the leading whitespace from the line containing the given offset.

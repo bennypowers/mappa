@@ -85,6 +85,9 @@ func run(cmd *cobra.Command, args []string) error {
 	errs := im.Validate()
 
 	if format == "json" {
+		if errs == nil {
+			errs = []*importmap.ValidationError{}
+		}
 		out, err := json.MarshalIndent(errs, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal errors: %w", err)

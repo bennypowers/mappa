@@ -963,7 +963,10 @@ func TestValidateFormatJSONValid(t *testing.T) {
 		t.Fatalf("Expected exit code 0 for valid import map, got %d", code)
 	}
 
-	// stdout should be valid JSON with empty/null array
+	// stdout should be a JSON array, never null
+	if strings.TrimSpace(stdout) == "null" {
+		t.Fatalf("Expected [] for a valid import map, got null")
+	}
 	var errs []map[string]any
 	if err := json.Unmarshal([]byte(stdout), &errs); err != nil {
 		t.Fatalf("Expected valid JSON on stdout, got error: %v\nstdout: %s", err, stdout)
@@ -1035,6 +1038,188 @@ func copyDir(t *testing.T, src, dst string) {
 			copyDir(t, srcPath, dstPath)
 		} else {
 			copyFile(t, srcPath, dstPath)
+		}
+	}
+}
+
+func TestTraceBatchHonorsOutput(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+	outPath := filepath.Join(t.TempDir(), "out.ndjson")
+
+	stdout, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir, "-o", outPath)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("Expected no stdout when -o is set, got: %s", stdout)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("Expected output file: %v", err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(data)), "\n"); len(lines) != 2 {
+		t.Errorf("Expected 2 lines in output file, got %d: %s", len(lines), data)
+	}
+}
+
+func TestTraceBatchDeterministicOrder(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+
+	first, stderr, code := runCLI(t, "trace", file2, file1, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+	second, _, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d", code)
+	}
+	if first != second {
+		t.Errorf("Batch output is not deterministic:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+
+	lines := strings.Split(strings.TrimSpace(first), "\n")
+	var files []string
+	for _, line := range lines {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("Invalid NDJSON: %v", err)
+		}
+		// file paths may differ in absolute prefix; compare base names
+		files = append(files, filepath.Base(result["file"].(string)))
+	}
+	if len(files) != 2 || files[0] > files[1] {
+		t.Errorf("Expected results sorted by file, got %v", files)
+	}
+}
+
+func TestTraceBatchRejectsSpecifiersFormat(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	file2 := filepath.Join(fixtureDir, "page2.html")
+
+	_, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir, "--format", "specifiers")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for specifiers format in batch mode")
+	}
+	if !strings.Contains(stderr, "not supported for batch mode") {
+		t.Errorf("Expected batch format error, got: %s", stderr)
+	}
+}
+
+func TestTraceBatchPartialFailureExitsNonZero(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "batch")
+	file1 := filepath.Join(fixtureDir, "page1.html")
+	missing := filepath.Join(fixtureDir, "missing.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file1, missing, "--package", fixtureDir)
+	if code == 0 {
+		t.Fatalf("Expected non-zero exit code when a file fails, stderr: %s", stderr)
+	}
+	if lines := strings.Split(strings.TrimSpace(stdout), "\n"); len(lines) != 2 {
+		t.Errorf("Expected a result line for every file, got %d: %s", len(lines), stdout)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("Invalid NDJSON: %v", err)
+		}
+		if _, ok := result["imports"].(map[string]any); !ok {
+			t.Errorf("Expected imports object (not null) on every line, got: %s", line)
+		}
+	}
+}
+
+func TestVersionFlag(t *testing.T) {
+	stdout, stderr, code := runCLI(t, "--version")
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "mappa") {
+		t.Errorf("Expected version output, got: %s", stdout)
+	}
+}
+
+func TestVersionInvalidFormat(t *testing.T) {
+	_, stderr, code := runCLI(t, "version", "--format", "yaml")
+	if code == 0 {
+		t.Error("Expected non-zero exit code for invalid version format")
+	}
+	if !strings.Contains(stderr, "invalid format") {
+		t.Errorf("Expected invalid format error, got: %s", stderr)
+	}
+}
+
+func TestGenerateWarnsOnMissingDependency(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "generate", "missing-dep")
+
+	stdout, stderr, code := runCLI(t, "generate", "--package", fixtureDir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0 without --strict, got %d\nstderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "missing-pkg") {
+		t.Errorf("Expected warning naming the missing dependency, got: %s", stderr)
+	}
+	if !strings.Contains(stdout, "{}") {
+		t.Errorf("Expected empty map, got: %s", stdout)
+	}
+
+	_, stderr, code = runCLI(t, "generate", "--package", fixtureDir, "--strict")
+	if code == 0 {
+		t.Error("Expected non-zero exit code with --strict")
+	}
+	if !strings.Contains(stderr, "strict") {
+		t.Errorf("Expected strict-mode error, got: %s", stderr)
+	}
+}
+
+func TestGenerateWarnsOnMissingPackageJSON(t *testing.T) {
+	dir := t.TempDir()
+	_, stderr, code := runCLI(t, "generate", "--package", dir)
+	if code != 0 {
+		t.Fatalf("Expected exit code 0, got %d\nstderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "package.json") {
+		t.Errorf("Expected warning about missing package.json, got: %s", stderr)
+	}
+}
+
+func TestInjectEmptyGlobErrors(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "inject", "no-imports")
+	pattern := filepath.Join(t.TempDir(), "*.html")
+
+	_, stderr, code := runCLI(t, "inject", "--glob", pattern, "--package", fixtureDir)
+	if code == 0 {
+		t.Error("Expected non-zero exit code when no files match")
+	}
+	if !strings.Contains(stderr, "no files matched") {
+		t.Errorf("Expected empty-glob error, got: %s", stderr)
+	}
+}
+
+func TestTraceBatchFailsWhenModuleCannotBeRead(t *testing.T) {
+	fixtureDir := filepath.Join("testdata", "trace", "missing-module")
+	file1 := filepath.Join(fixtureDir, "index.html")
+	file2 := filepath.Join(fixtureDir, "other.html")
+
+	stdout, stderr, code := runCLI(t, "trace", file1, file2, "--package", fixtureDir)
+	if code == 0 {
+		t.Fatalf("Expected non-zero exit code when modules cannot be read, stderr: %s", stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Expected a line per file, got %d: %s", len(lines), stdout)
+	}
+	for _, line := range lines {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			t.Fatalf("Invalid NDJSON: %v", err)
+		}
+		if result["error"] == nil {
+			t.Errorf("Expected an error for a file with an unreadable module: %s", line)
 		}
 	}
 }

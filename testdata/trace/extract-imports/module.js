@@ -6,3 +6,4 @@ import styles from './styles.css' with { type: 'css' };
 export { something } from 'other-module';
 
 const lazyModule = import('./lazy.js');
+const awaitedModule = await import('./awaited.js');

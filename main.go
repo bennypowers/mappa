@@ -32,6 +32,7 @@ import (
 	"bennypowers.dev/mappa/cmd/trace"
 	"bennypowers.dev/mappa/cmd/validate"
 	"bennypowers.dev/mappa/cmd/version"
+	appversion "bennypowers.dev/mappa/internal/version"
 )
 
 var (
@@ -71,6 +72,9 @@ var (
 )
 
 func init() {
+	rootCmd.Version = appversion.VersionString()
+	rootCmd.SetVersionTemplate("mappa {{.Version}}\n")
+
 	// Root flags (persistent across all commands)
 	rootCmd.PersistentFlags().StringP("package", "p", ".", "Package directory")
 	rootCmd.PersistentFlags().StringP("output", "o", "", "Output file (default: stdout)")

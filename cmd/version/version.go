@@ -29,10 +29,11 @@ import (
 
 // Cmd is the version cobra command that prints version and build information.
 var Cmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print version information",
-	Long:  `Print version information for mappa.`,
-	RunE:  run,
+	Use:          "version",
+	Short:        "Print version information",
+	Long:         `Print version information for mappa.`,
+	SilenceUsage: true,
+	RunE:         run,
 }
 
 func init() {
@@ -44,16 +45,19 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error reading format flag: %w", err)
 	}
+	if format != "text" && format != "json" {
+		return fmt.Errorf("invalid format %q: must be 'text' or 'json'", format)
+	}
 	switch format {
 	case "json":
-		buildInfo := version.GetBuildInfo()
+		buildInfo := version.BuildInfo()
 		out, err := json.MarshalIndent(buildInfo, "", "  ")
 		if err != nil {
 			return fmt.Errorf("error marshaling version info: %w", err)
 		}
 		fmt.Println(string(out))
 	default:
-		fmt.Printf("mappa %s\n", version.GetVersion())
+		fmt.Printf("mappa %s\n", version.VersionString())
 	}
 	return nil
 }

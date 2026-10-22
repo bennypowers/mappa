@@ -31,6 +31,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/inject"
+	"bennypowers.dev/mappa/internal/output"
 )
 
 // Cmd is the inject cobra command that traces HTML files and updates
@@ -54,7 +55,8 @@ and writes the result back to the file.`,
 
   # Dry run to see what would change
   mappa inject --glob "_site/**/*.html" --dry-run`,
-	RunE: run,
+	SilenceUsage: true,
+	RunE:         run,
 }
 
 func init() {
@@ -84,8 +86,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(matches) == 0 {
-		fmt.Fprintln(os.Stderr, "Warning: no files matched the glob pattern")
-		return nil
+		return fmt.Errorf("no files matched the glob pattern %q", globPattern)
 	}
 
 	// Deduplicate by absolute path
@@ -117,6 +118,7 @@ func run(cmd *cobra.Command, args []string) error {
 		Conditions: conditions,
 		Parallel:   parallel,
 		DryRun:     dryRun,
+		Logger:     output.NewWarningLogger(os.Stderr),
 	}
 
 	// Run inject
@@ -177,8 +179,8 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Println(string(statsJSON))
 	}
 
-	if stats.Errors == stats.Total {
-		return fmt.Errorf("all %d files failed", stats.Errors)
+	if stats.Errors > 0 {
+		return fmt.Errorf("%d of %d files failed", stats.Errors, stats.Total)
 	}
 
 	return nil
