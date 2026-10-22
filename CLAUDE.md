@@ -100,6 +100,16 @@ Fixtures should contain:
 - Input files (`.js`, `.html`, `.json`, etc.)
 - Expected output (`expected.json`)
 
+## Release notes
+
+- `make notes <vX.Y.Z|patch|minor|major>` generates an untracked draft in
+  `docs/releases/` and opens `$EDITOR` for review.
+- Set `RELEASE_NOTES_NO_EDIT=1` for non-interactive generation. The draft is
+  still left on disk for review.
+- `make release ...` pushes and publishes. Run it only when the user
+  explicitly asks for a release.
+- Published notes live in GitHub releases; `docs/releases/` is gitignored.
+
 ## Git
 
 When commit messages mention AI agents, always use `Assisted-By`, never use `Co-Authored-By`.
