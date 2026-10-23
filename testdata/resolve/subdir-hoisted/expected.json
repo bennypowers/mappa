@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "hoisted-dep": "/node_modules/hoisted-dep/index.js"
+  },
+  "scopes": {
+    "/node_modules/hoisted-dep/": {
+      "leaf": "/node_modules/leaf/index.js"
+    }
+  }
+}
