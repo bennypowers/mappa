@@ -82,7 +82,7 @@ const generateOptionKeys = [
   "exclude",
   "timeoutMs",
   "allowPartial",
-] as const;
+] as const satisfies readonly (keyof GenerateOptions)[];
 
 const resolveOptionKeys = [
   "template",
@@ -93,7 +93,24 @@ const resolveOptionKeys = [
   "optimize",
   "pathBase",
   "packageDeps",
-] as const;
+] as const satisfies readonly (keyof ResolveOptions)[];
+
+// Completeness assertions: adding an option without listing its key above
+// makes these assignments fail compilation.
+type MissingGenerateKeys = Exclude<
+  keyof GenerateOptions,
+  (typeof generateOptionKeys)[number]
+>;
+type MissingResolveKeys = Exclude<
+  keyof ResolveOptions,
+  (typeof resolveOptionKeys)[number]
+>;
+const _generateKeysComplete: [MissingGenerateKeys] extends [never] ? true : never =
+  true;
+const _resolveKeysComplete: [MissingResolveKeys] extends [never] ? true : never =
+  true;
+void _generateKeysComplete;
+void _resolveKeysComplete;
 
 // Copy caller options into a fresh plain object before they cross into Go.
 // syscall/js property access is unguarded: a throwing getter or Proxy trap on
@@ -104,6 +121,9 @@ function normalizeOptions<T>(
   keys: readonly string[]
 ): T | undefined | null {
   if (options === undefined || options === null) return options;
+  // Arrays are objects, so pass them through unchanged for Go to reject with
+  // its own error instead of silently normalizing them to an object.
+  if (Array.isArray(options)) return options;
   if (typeof options !== "object") return options;
 
   const normalized: Record<string, unknown> = {};
