@@ -534,15 +534,6 @@ func containsPath(root, p string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// allowPath applies containment checks for module tracing. Paths must live
-// under the package root, the workspace node_modules tree, or a discovered
-// workspace package directory.
-//
-// Symlinks are not resolved: fs.FileSystem exposes no Lstat/Readlink
-// operation, so a symlink planted inside an allowed root could point outside
-// it and this check would not notice. Callers that need that guarantee must
-// supply a filesystem whose Stat already resolves links to the real path or
-// reject escaping links before tracing.
 // readFile reads path, preferring a confined read through fs.RootedFS when
 // the backend supports it and the path is under an allowed root. A rooted
 // read makes containment an OS guarantee instead of a check-then-read.
