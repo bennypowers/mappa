@@ -55,6 +55,9 @@ emerge dev-util/mappa
 go install bennypowers.dev/mappa@latest
 ```
 
+The `trace` command uses tree-sitter, so building from source requires a C
+toolchain and `CGO_ENABLED=1` (the default when a compiler is present).
+
 ## Quick Start
 
 Generate an import map for your project:
@@ -80,11 +83,21 @@ Generate an import map from `package.json` dependencies.
 Flags:
   -f, --format string        Output format: json, html (default "json")
       --include-package      Additional packages to include (repeatable)
+      --exclude              Packages to exclude, including transitively (repeatable)
       --input-map string     Import map file to merge with generated output
       --template string      URL template (default: /node_modules/{package}/{path})
+      --conditions strings   Export condition priority (e.g. production,browser,import,default)
+  -O, --optimize int         Optimization level: 0=none, 1=simplify+dedup (default 1)
+      --strict               Exit non-zero on validation warnings or unresolved declared deps
+      --path-base string     Rebase workspace paths relative to this directory
+      --package-deps string  Limit dependency resolution to this package's dependencies
+      --cpuprofile string    Write a CPU profile to this file
   -p, --package string       Package directory (default ".")
   -o, --output string        Output file (default: stdout)
 ```
+
+Warnings about declared dependencies that could not be resolved are written to
+stderr. Use `--strict` to turn them into a non-zero exit.
 
 **Examples:**
 
@@ -126,9 +139,22 @@ mappa trace index.html --template "/assets/packages/{package}/{path}"
 # Batch mode with glob pattern (outputs NDJSON)
 mappa trace --glob "_site/**/*.html" -j 8
 
+# Write batch NDJSON to a file
+mappa trace --glob "_site/**/*.html" -o trace.ndjson
+
 # Output raw traced specifiers for debugging
 mappa trace index.html --format specifiers
 ```
+
+In batch mode (more than one file), each NDJSON line is a result envelope:
+
+```json
+{"file":"pages/index.html","imports":{"lit":"/node_modules/lit/index.js"},"scopes":{...},"errors":["..."]}
+```
+
+Results are sorted by file name and `--format` only accepts `json`. A file-level
+failure sets the process exit code to 1 while still emitting a line for every
+file.
 
 **How it works:**
 
@@ -156,6 +182,66 @@ The trace command uses static analysis to find imports. This means:
 
 - The same applies to scopes: transitive dependencies with wildcard exports get trailing-slash keys so their dynamic imports work correctly.
 
+### `mappa inject`
+
+Trace HTML files and update their import map script tags in place. Existing
+manual imports are preserved; traced imports take precedence.
+
+```
+Flags:
+      --glob string          Glob pattern to match HTML files (required)
+      --template string      URL template (default: /node_modules/{package}/{path})
+      --conditions strings   Export condition priority
+  -j, --jobs int             Number of parallel workers (default: number of CPUs)
+      --dry-run              Show what would change without modifying files
+  -f, --format string        Output format: text, json (default "text")
+  -p, --package string       Package directory (default ".")
+```
+
+The exit code is 0 only when every matched file was processed successfully.
+If the generated map is empty, the file is left unchanged.
+
+### `mappa validate`
+
+Validate an import map against the WHATWG specification. Reads a file argument
+or stdin.
+
+```
+Flags:
+  -f, --format string        Output format: text, json (default "text")
+```
+
+Exits 0 when the map is valid and 1 otherwise. With `--format json`, valid maps
+print `[]` and invalid maps print an array of error objects.
+
+### `mappa version`
+
+Print version and build information.
+
+```
+Flags:
+  -f, --format string        Output format: text, json (default "text")
+```
+
+`mappa --version` prints the same version as `mappa version`.
+
+### Exit codes
+
+All commands exit 0 on success and 1 on failure. In batch mode (`trace` and
+`inject`), any file-level failure makes the command exit 1 while results for the
+other files are still emitted.
+
+## Workspaces
+
+When `package.json` has a `workspaces` field, mappa discovers workspace packages
+automatically. Workspace packages are mapped to their source directories
+(relative to the resolution root) instead of `node_modules`, and their
+dependencies are resolved from the workspace root.
+
+Use `--package-deps <dir>` to limit dependency collection to one workspace
+package, and `--path-base <dir>` to rebase workspace paths relative to a
+subdirectory. pnpm-style `**` workspace globs are not supported.
+
 ## URL Templates
 
 Templates use `{variable}` syntax for dynamic URL generation:
@@ -166,6 +252,10 @@ Templates use `{variable}` syntax for dynamic URL generation:
 | `{name}`    | Package name without scope | `name`                     |
 | `{scope}`   | Scope without @ prefix     | `scope`                    |
 | `{path}`    | File path within package   | `index.js`                 |
+| `{version}` | Package version (CDN only) | `3.0.0`                    |
+
+`{version}` is populated by CDN resolution. Local resolution has no version
+information available, so it expands to an empty string.
 
 **Examples:**
 
@@ -222,6 +312,11 @@ const importMap = await resolve('.', {
 | `exclude` | `string[]` | Packages to exclude |
 | `inputMap` | `ImportMap` | Import map to merge (takes precedence) |
 | `optimize` | `0 \| 1` | 0=none, 1=simplify+dedup (default: 1) |
+| `pathBase` | `string` | Rebase workspace paths relative to this directory |
+| `packageDeps` | `string` | Limit dependency resolution to this package's dependencies |
+
+`resolve()` reads from the local filesystem and is therefore Node-only; in
+browsers use `generate()`, which resolves through a CDN.
 
 ### `generate(packageJson, options?)`
 
@@ -243,6 +338,10 @@ const importMap = await generate(
 | `cdn` | `"esm.sh" \| "unpkg" \| "jsdelivr"` | CDN provider |
 | `template` | `string` | Custom CDN URL template |
 | `conditions` | `string[]` | Export conditions |
+| `exclude` | `string[]` | Packages to exclude, including transitively |
+
+An unknown `cdn` value rejects the promise with an error listing the supported
+provider names.
 
 ### `version()`
 

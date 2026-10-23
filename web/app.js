@@ -40,7 +40,7 @@ async function initWasm() {
         });
 
         wasmReady = true;
-        versionSpan.textContent = `WASM v${globalThis.mappa.version}`;
+        versionSpan.textContent = `WASM ${globalThis.mappa.version}`;
         generateBtn.disabled = false;
         outputCode.textContent = 'Ready. Enter a package.json and click Generate.';
 

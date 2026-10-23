@@ -17,49 +17,28 @@ VERSION="$1"
 # Remove 'v' prefix if present
 VERSION="${VERSION#v}"
 
-echo "Updating version to: $VERSION"
-
-# Update npm/package.json main version
-echo "Updating npm/package.json..."
-if command -v jq &> /dev/null; then
-  jq --arg v "$VERSION" ".version = \$v" npm/package.json > npm/package.json.tmp
-  mv npm/package.json.tmp npm/package.json
-elif command -v node &> /dev/null; then
-  VERSION="$VERSION" node -e "
-    const fs = require('fs');
-    const pkg = JSON.parse(fs.readFileSync('npm/package.json', 'utf8'));
-    pkg.version = process.env.VERSION;
-    fs.writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
-  "
-else
-  echo "Error: jq or node is required to update version"
-  exit 1
-fi
-
-# Validate VERSION is semver format (basic check for safety)
+# Validate VERSION is semver format before writing anything
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Error: Invalid version format '$VERSION'. Expected semver like 0.0.4"
   exit 1
 fi
 
-# Update optionalDependencies versions
-echo "Updating npm/package.json optionalDependencies..."
-if command -v jq &> /dev/null; then
-  jq --arg v "$VERSION" ".optionalDependencies |= with_entries(.value = \$v)" npm/package.json > npm/package.json.tmp
-  mv npm/package.json.tmp npm/package.json
-elif command -v node &> /dev/null; then
-  node -e "
-    const fs = require('fs');
-    const pkg = JSON.parse(fs.readFileSync('npm/package.json', 'utf8'));
-    for (const key in pkg.optionalDependencies) {
-      pkg.optionalDependencies[key] = process.env.VERSION;
-    }
-    fs.writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
-  "
-else
-  echo "Error: jq or node is required to update optionalDependencies"
+echo "Updating version to: $VERSION"
+
+if ! command -v jq &> /dev/null; then
+  echo "Error: jq is required to update npm/package.json"
   exit 1
 fi
+
+# Update npm/package.json main version
+echo "Updating npm/package.json..."
+jq --arg v "$VERSION" ".version = \$v" npm/package.json > npm/package.json.tmp
+mv npm/package.json.tmp npm/package.json
+
+# Update optionalDependencies versions
+echo "Updating npm/package.json optionalDependencies..."
+jq --arg v "$VERSION" ".optionalDependencies |= with_entries(.value = \$v)" npm/package.json > npm/package.json.tmp
+mv npm/package.json.tmp npm/package.json
 
 # Update package-lock.json
 echo "Updating package-lock.json..."

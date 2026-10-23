@@ -114,6 +114,12 @@ func TestApplyWiresAllowPartial(t *testing.T) {
 
 func TestApplyWiresProviderAndTemplateValidation(t *testing.T) {
 	fetcher := &deadlineFetcher{}
+	if _, err := (Generate{CDN: "bogus"}).Apply(cdnresolver.New(fetcher)); err == nil {
+		t.Fatal("expected an unknown CDN provider to fail")
+	} else if !strings.Contains(err.Error(), "unknown CDN provider") {
+		t.Errorf("expected a descriptive provider error, got %v", err)
+	}
+
 	resolver, err := Generate{CDN: "unpkg"}.Apply(cdnresolver.New(fetcher))
 	if err != nil {
 		t.Fatalf("Apply error: %v", err)

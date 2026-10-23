@@ -21,6 +21,8 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package options
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
@@ -48,16 +50,19 @@ type Generate struct {
 // Apply returns a resolver configured according to the options.
 func (o Generate) Apply(resolver *cdnresolver.Resolver) (*cdnresolver.Resolver, error) {
 	if o.CDN != "" {
-		if provider := mappacdn.ProviderByName(o.CDN); provider != nil {
-			resolver = resolver.WithProvider(*provider)
+		provider := mappacdn.ProviderByName(o.CDN)
+		if provider == nil {
+			return nil, fmt.Errorf("unknown CDN provider %q (supported: %s)",
+				o.CDN, strings.Join(mappacdn.ProviderNames(), ", "))
 		}
+		resolver = resolver.WithProvider(*provider)
 	}
 
 	if o.Template != "" {
 		var err error
 		resolver, err = resolver.WithTemplate(o.Template)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid template: %w", err)
 		}
 	}
 

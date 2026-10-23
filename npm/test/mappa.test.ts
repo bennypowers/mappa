@@ -1,5 +1,3 @@
-import "./setup.ts";
-
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { resolve as pathResolve } from "node:path";
@@ -11,10 +9,17 @@ const fixtureDir = (...segments: string[]) =>
   pathResolve(import.meta.dirname!, "..", "..", "testdata", ...segments);
 
 describe("version", () => {
-  it("returns a string", async () => {
+  it("returns the embedded version", async () => {
     const v = await version();
     assert.equal(typeof v, "string");
-    assert.ok(v.length > 0);
+    // CI can pin the expected build version; otherwise require a non-empty
+    // string so a default `npm test` does not depend on how WASM was built.
+    const expected = process.env.MAPPA_EXPECTED_VERSION;
+    if (expected) {
+      assert.equal(v, expected);
+    } else {
+      assert.ok(v.length > 0);
+    }
   });
 });
 
