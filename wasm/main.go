@@ -211,7 +211,9 @@ func parseGenerateOptions(args []js.Value) (options.Generate, error) {
 	}
 
 	obj := args[1]
-	if obj.Type() != js.TypeObject {
+	// Arrays are JS objects but not valid option bags; reject them explicitly
+	// rather than silently treating them as an empty options object.
+	if obj.Type() != js.TypeObject || js.Global().Get("Array").Call("isArray", obj).Bool() {
 		return opts, &jsError{message: "options must be an object"}
 	}
 
@@ -301,7 +303,7 @@ func parseResolveOptions(args []js.Value) (resolveOptions, error) {
 	}
 
 	obj := args[1]
-	if obj.Type() != js.TypeObject {
+	if obj.Type() != js.TypeObject || js.Global().Get("Array").Call("isArray", obj).Bool() {
 		return opts, &jsError{message: "options must be an object"}
 	}
 
