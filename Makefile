@@ -1,6 +1,6 @@
 .PHONY: all test lint lint-shell clean install
 .PHONY: linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64
-.PHONY: wasm wasm-release wasm-serve
+.PHONY: wasm wasm-release wasm-serve test-wasm
 .PHONY: notes release patch minor major test-scripts
 
 BINARY_NAME := mappa
@@ -38,17 +38,21 @@ lint:
 	go vet ./...
 	golangci-lint run
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -x scripts/release.sh scripts/notes.sh scripts/version.sh scripts/download-wasm-assets.sh scripts/lib/*.sh scripts/release-notes/*.sh; \
+		shellcheck -x scripts/release.sh scripts/notes.sh scripts/version.sh scripts/download-wasm-assets.sh scripts/test-wasm.sh scripts/lib/*.sh scripts/release-notes/*.sh; \
 	else \
 		echo "shellcheck not installed; skipping shell lint"; \
 	fi
 
 lint-shell:
-	shellcheck -x scripts/release.sh scripts/notes.sh scripts/version.sh scripts/download-wasm-assets.sh scripts/lib/*.sh scripts/release-notes/*.sh
+	shellcheck -x scripts/release.sh scripts/notes.sh scripts/version.sh scripts/download-wasm-assets.sh scripts/test-wasm.sh scripts/lib/*.sh scripts/release-notes/*.sh
 
 test-scripts:
 	@./scripts/release-notes/test.sh
 	@./scripts/version.test.sh
+
+# js/wasm transport tests, run under Node against a local fixture server.
+test-wasm:
+	@./scripts/test-wasm.sh
 
 # Cross-compilation targets for go-release-workflows
 # Requires CGO for tree-sitter bindings
