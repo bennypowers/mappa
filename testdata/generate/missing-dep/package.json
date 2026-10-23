@@ -1,0 +1,6 @@
+{
+  "name": "missing-dep-app",
+  "dependencies": {
+    "missing-pkg": "^1.0.0"
+  }
+}

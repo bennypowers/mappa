@@ -14,12 +14,9 @@
       (string_fragment) @dynamicImport.spec))) @dynamicImport
 
 ; Async dynamic imports: await import('path')
-(await_expression
-  (call_expression
-    function: (import)
-    arguments: (arguments
-      (string
-        (string_fragment) @dynamicImport.spec)))) @dynamicImport
+; The call_expression pattern above already matches the call inside an
+; await_expression, so no separate pattern is needed (and adding one would
+; produce duplicate captures).
 
 ; Re-exports: export { foo } from 'bar';
 (export_statement

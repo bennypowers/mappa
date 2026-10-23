@@ -1,0 +1,10 @@
+{
+  "scripts": [
+    {
+      "type": "module",
+      "src": "./live.js",
+      "inline": false,
+      "imports": []
+    }
+  ]
+}

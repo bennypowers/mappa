@@ -56,7 +56,8 @@ By default, generates local /node_modules paths. Use --template for custom paths
 
   # Output as HTML script tag
   mappa generate --format html`,
-	RunE: run,
+	SilenceUsage: true,
+	RunE:         run,
 }
 
 func init() {
@@ -67,7 +68,7 @@ func init() {
 	Cmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify+dedup (default)")
-	Cmd.Flags().Bool("strict", false, "Exit non-zero on import map validation warnings")
+	Cmd.Flags().Bool("strict", false, "Exit non-zero on import map validation or dependency resolution warnings")
 	Cmd.Flags().String("path-base", "", "Rebase workspace paths relative to this directory")
 	Cmd.Flags().String("package-deps", "", "Limit dependency resolution to this package's dependencies")
 
@@ -120,11 +121,12 @@ func run(cmd *cobra.Command, args []string) error {
 		IncludePackages: viper.GetStringSlice("include-package"),
 		Exclude:         viper.GetStringSlice("exclude"),
 		InputMap:        inputMap,
-		PathBase:         viper.GetString("path-base"),
+		PathBase:        viper.GetString("path-base"),
 		PackageDeps:     viper.GetString("package-deps"),
 	}
 
-	resolver, err := opts.Apply(local.New(osfs, nil))
+	logger := output.NewWarningLogger(cmd.ErrOrStderr())
+	resolver, err := opts.Apply(local.New(osfs, logger))
 	if err != nil {
 		return err
 	}
@@ -132,6 +134,9 @@ func run(cmd *cobra.Command, args []string) error {
 	generatedMap, err := resolver.Resolve(absRoot)
 	if err != nil {
 		return fmt.Errorf("failed to resolve: %w", err)
+	}
+	if viper.GetBool("strict") && len(logger.Warnings()) > 0 {
+		return fmt.Errorf("%d unresolved dependency warning(s) (strict mode)", len(logger.Warnings()))
 	}
 
 	optimizeLevel := viper.GetInt("optimize")

@@ -19,10 +19,13 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package trace
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/spf13/cobra"
@@ -60,7 +63,8 @@ Use --format specifiers for debugging to see the raw trace output.`,
 
   # Output as HTML script tag (single file only)
   mappa trace index.html --format html`,
-	RunE: run,
+	SilenceUsage: true,
+	RunE:         run,
 }
 
 func init() {
@@ -136,6 +140,7 @@ func run(cmd *cobra.Command, args []string) error {
 		Template:   templateArg,
 		Conditions: conditions,
 		Parallel:   parallel,
+		Logger:     output.NewWarningLogger(os.Stderr),
 	}
 
 	// Single file mode
@@ -150,7 +155,7 @@ func run(cmd *cobra.Command, args []string) error {
 func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Options) error {
 	// Handle specifiers format separately
 	if format == "specifiers" {
-		result, issues, err := trace.TraceSpecifiers(osfs, file, absRoot)
+		result, issues, err := trace.TraceSpecifiers(osfs, file, absRoot, opts)
 		if err != nil {
 			return fmt.Errorf("failed to trace: %w", err)
 		}
@@ -159,6 +164,12 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 		for _, issue := range issues {
 			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
 			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
+		}
+		for _, graphErr := range result.Errors {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", graphErr)
+		}
+		if fatal, _ := trace.ClassifyGraphErrors(result.Errors); len(fatal) > 0 {
+			return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
 		}
 
 		out, err := json.MarshalIndent(result, "", "  ")
@@ -182,47 +193,73 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
 		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
 	}
+	for _, graphErr := range result.Errors {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", graphErr)
+	}
+
+	// Read/parse failures make the import map incomplete. Report them as
+	// failures instead of emitting a partial map with a success exit code.
+	if fatal, _ := trace.ClassifyGraphErrors(result.Errors); len(fatal) > 0 {
+		return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
+	}
 
 	return output.ImportMap(osfs, result.ImportMap, format)
 }
 
 func runBatch(osfs fs.FileSystem, files []string, absRoot, format string, opts trace.Options) error {
-	// html format doesn't make sense for batch mode
-	if format == "html" {
-		return fmt.Errorf("--format html is not supported for batch mode (multiple files)")
+	// Only NDJSON is meaningful for multiple files.
+	if format != "json" {
+		return fmt.Errorf("--format %s is not supported for batch mode (multiple files)", format)
 	}
 
 	// Run batch trace
 	results := trace.TraceBatch(osfs, files, absRoot, opts)
 
-	// Collect results and output NDJSON
-	encoder := json.NewEncoder(os.Stdout)
-	var allWarnings []trace.Warning
-	var errorCount int
-	var totalCount int
-
+	// Collect results so output is deterministic and -o/--output is honored.
+	var collected []trace.BatchResult
 	for result := range results {
-		totalCount++
+		collected = append(collected, result)
+	}
+	sort.Slice(collected, func(i, j int) bool { return collected[i].File < collected[j].File })
+
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	var errorCount int
+	for _, result := range collected {
 		if result.Error != "" {
 			errorCount++
 		}
-		// Collect warnings for serial output
-		allWarnings = append(allWarnings, result.Warnings...)
 		// Clear warnings from JSON output (they go to stderr)
 		result.Warnings = nil
 		if err := encoder.Encode(result); err != nil {
-			fmt.Fprintf(os.Stderr, "Error encoding result for %s: %v\n", result.File, err)
+			return fmt.Errorf("encoding result for %s: %w", result.File, err)
 		}
 	}
 
-	// Output warnings serially to stderr
-	for _, w := range allWarnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
-		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
+	if outputPath := viper.GetString("output"); outputPath != "" {
+		if err := osfs.WriteFile(outputPath, buf.Bytes(), 0644); err != nil {
+			return fmt.Errorf("writing output: %w", err)
+		}
+	} else {
+		if _, err := os.Stdout.Write(buf.Bytes()); err != nil {
+			return err
+		}
 	}
 
-	if errorCount == totalCount {
-		return fmt.Errorf("all %d files failed to trace", errorCount)
+	// Output warnings and non-fatal graph errors serially to stderr in the
+	// same sorted order as stdout.
+	for _, result := range collected {
+		for _, w := range result.Warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
+			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
+		}
+		for _, graphErr := range result.GraphErrors {
+			fmt.Fprintf(os.Stderr, "Warning: %s: %s\n", result.File, graphErr)
+		}
+	}
+
+	if errorCount > 0 {
+		return fmt.Errorf("%d of %d files failed to trace", errorCount, len(collected))
 	}
 	return nil
 }

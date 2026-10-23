@@ -19,6 +19,7 @@ package trace
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -515,14 +516,41 @@ func TestFindInsertPoint_NoScripts(t *testing.T) {
 }
 
 func TestFindInsertPoint_NoHead(t *testing.T) {
-	html := []byte(`<!DOCTYPE html>
-<html>
-<body></body>
-</html>`)
+	mfs := testutil.NewFixtureFS(t, "trace/find-insertpoint-no-head", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+
+	expectedBytes, err := mfs.ReadFile("/test/expected.json")
+	if err != nil {
+		t.Fatalf("Failed to read expected.json: %v", err)
+	}
+
+	var expected struct {
+		Found  bool   `json:"found"`
+		Offset int    `json:"offset"`
+		Indent string `json:"indent"`
+	}
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatalf("Failed to parse expected.json: %v", err)
+	}
 
 	pt := FindInsertPoint(html)
-	if pt.Found {
-		t.Errorf("Expected Found=false for HTML without head")
+	if !pt.Found {
+		t.Fatal("Expected a fallback insert point for HTML without head")
+	}
+	if pt.Found != expected.Found {
+		t.Errorf("Found: expected %v, got %v", expected.Found, pt.Found)
+	}
+	if pt.Offset != expected.Offset {
+		t.Errorf("Offset: expected %d, got %d", expected.Offset, pt.Offset)
+	}
+	if pt.Indent != expected.Indent {
+		t.Errorf("Indent: expected %q, got %q", expected.Indent, pt.Indent)
+	}
+	if !strings.HasPrefix(string(html[pt.Offset:]), "</body>") {
+		t.Errorf("Expected insertion before </body>, got: %q", html[pt.Offset:])
 	}
 }
 
@@ -566,3 +594,362 @@ func TestTraceHTML_CircularModules(t *testing.T) {
 	}
 }
 
+func TestTraceSingleSelfImports(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/self-import", "/test")
+
+	result, err := TraceSingle(mfs, "/test/index.html", "/test", Options{})
+	if err != nil {
+		t.Fatalf("TraceSingle failed: %v", err)
+	}
+	if got := result.ImportMap.Imports["my-lib"]; got != "/index.js" {
+		t.Errorf("self import my-lib = %q, want /index.js (imports: %v)", got, result.ImportMap.Imports)
+	}
+	if got := result.ImportMap.Imports["my-lib/button"]; got != "/button.js" {
+		t.Errorf("self import my-lib/button = %q, want /button.js (imports: %v)", got, result.ImportMap.Imports)
+	}
+}
+
+func TestIsBareSpecifierClassification(t *testing.T) {
+	tests := []struct {
+		spec string
+		bare bool
+	}{
+		{"lit", true},
+		{"lit/decorators.js", true},
+		{"./local.js", false},
+		{"../local.js", false},
+		{"/root.js", false},
+		{"node:fs", false},
+		{"data:text/javascript,export{}", false},
+		{"https://example.com/mod.js", false},
+		{"//example.com/mod.js", false},
+		{"#internal", false},
+	}
+	for _, tt := range tests {
+		if got := isBareSpecifier(tt.spec); got != tt.bare {
+			t.Errorf("isBareSpecifier(%q) = %v, want %v", tt.spec, got, tt.bare)
+		}
+	}
+}
+
+func TestHTMLTypeCaseInsensitive(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/html-case", "/test")
+	content, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+
+	if loc := FindImportMapTag(content); !loc.Found {
+		t.Error("expected type=ImportMap to be recognized")
+	}
+
+	scripts, err := ExtractScripts(content)
+	if err != nil {
+		t.Fatalf("ExtractScripts failed: %v", err)
+	}
+	foundModule := false
+	for _, s := range scripts {
+		if s.Type == "module" {
+			foundModule = true
+			if !slices.Contains(s.Imports, "lit") {
+				t.Errorf("expected inline module imports to be extracted, got %v", s.Imports)
+			}
+		}
+	}
+	if !foundModule {
+		t.Error("expected type=MODULE to be normalized to module")
+	}
+}
+
+func TestFindImportMapIgnoresInertElements(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/inert-importmap", "/test")
+	content, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+	loc := FindImportMapTag(content)
+	if !loc.Found {
+		t.Fatal("expected to find a live import map")
+	}
+	got := string(content[loc.ContentStart:loc.ContentEnd])
+	if !strings.Contains(got, "good") {
+		t.Errorf("expected live import map, got %q", got)
+	}
+}
+
+func TestFindInsertPointWithoutHead(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/no-head", "/test")
+	content, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+	point := FindInsertPoint(content)
+	if !point.Found {
+		t.Fatal("expected a fallback insertion point without <head>")
+	}
+	before := string(content[:point.Offset])
+	if !strings.Contains(before, "<body>") || strings.Contains(before, "<script") {
+		t.Errorf("expected insertion before first script in body, offset %d: %q", point.Offset, before)
+	}
+}
+
+func TestTraceIgnoresURLAndSubpathSpecifiers(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/url-specifiers", "/test")
+	graph, err := NewTracer(mfs, "/test").TraceHTML("/test/index.html")
+	if err != nil {
+		t.Fatalf("TraceHTML failed: %v", err)
+	}
+	if specs := graph.BareSpecifiers(); len(specs) != 0 {
+		t.Errorf("URL and # specifiers must not be treated as bare: %v", specs)
+	}
+	if len(graph.Errors) != 0 {
+		t.Errorf("expected no graph errors, got: %v", graph.Errors)
+	}
+}
+
+func TestTraceRejectsPathsOutsideRoot(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/path-traversal", "/test")
+	graph, err := NewTracer(mfs, "/test").TraceHTML("/test/index.html")
+	if err != nil {
+		t.Fatalf("TraceHTML failed: %v", err)
+	}
+	if len(graph.Errors) == 0 {
+		t.Fatal("expected a containment error for a path outside the root")
+	}
+	if !strings.Contains(graph.Errors[0].Error(), "outside allowed roots") {
+		t.Errorf("unexpected error: %v", graph.Errors[0])
+	}
+}
+
+func TestResolvePathStripsQueryAndFragment(t *testing.T) {
+	tr := NewTracer(nil, "/site")
+	if got := tr.resolvePath("/site/js", "./app.js?v=1#frag"); got != "/site/js/app.js" {
+		t.Errorf("relative path with suffix = %q", got)
+	}
+	if got := tr.resolvePath("/site/js", "/assets/app.js?v=1"); got != "/site/assets/app.js" {
+		t.Errorf("absolute path with suffix = %q", got)
+	}
+}
+
+func TestTraceSingleWorkspaceImport(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/workspace", "/test")
+	result, err := TraceSingle(mfs, "/test/packages/app/index.html", "/test/packages/app", Options{})
+	if err != nil {
+		t.Fatalf("TraceSingle failed: %v", err)
+	}
+	if got := result.ImportMap.Imports["@ws/lib"]; got != "/packages/lib/index.js" {
+		t.Errorf("@ws/lib = %q, want workspace source path (imports: %v)", got, result.ImportMap.Imports)
+	}
+}
+
+func TestTraceConditions(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/conditions", "/test")
+
+	browser, err := TraceSingle(mfs, "/test/index.html", "/test", Options{Conditions: []string{"browser"}})
+	if err != nil {
+		t.Fatalf("TraceSingle with browser condition failed: %v", err)
+	}
+	if got := browser.ImportMap.Imports["cond-pkg"]; got != "/node_modules/cond-pkg/browser.js" {
+		t.Errorf("browser condition = %q", got)
+	}
+
+	def, err := TraceSingle(mfs, "/test/index.html", "/test", Options{Conditions: []string{"default"}})
+	if err != nil {
+		t.Fatalf("TraceSingle with default condition failed: %v", err)
+	}
+	if got := def.ImportMap.Imports["cond-pkg"]; got != "/node_modules/cond-pkg/index.js" {
+		t.Errorf("default condition = %q", got)
+	}
+}
+
+func TestTraceSingleFiltersUnrelatedScopes(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/scope-closure", "/test")
+	result, err := TraceSingle(mfs, "/test/index.html", "/test", Options{})
+	if err != nil {
+		t.Fatalf("TraceSingle failed: %v", err)
+	}
+	if got := result.ImportMap.Imports["lit"]; got == "" {
+		t.Fatalf("expected lit import, got %v", result.ImportMap.Imports)
+	}
+	if _, ok := result.ImportMap.Scopes["/node_modules/lit/"]; !ok {
+		t.Errorf("expected lit scope in %v", result.ImportMap.Scopes)
+	}
+	if _, ok := result.ImportMap.Scopes["/node_modules/@lit/reactive-element/"]; !ok {
+		t.Errorf("expected transitive reactive-element scope in %v", result.ImportMap.Scopes)
+	}
+	if _, ok := result.ImportMap.Scopes["/node_modules/used/"]; !ok {
+		t.Errorf("expected scope for second specifier in %v", result.ImportMap.Scopes)
+	}
+	for scope := range result.ImportMap.Scopes {
+		if strings.Contains(scope, "unrelated") {
+			t.Errorf("unrelated scope leaked into map: %q (all: %v)", scope, result.ImportMap.Scopes)
+		}
+	}
+	if got := result.ImportMap.Scopes["/node_modules/lit/"]["@lit/reactive-element"]; got != "/node_modules/@lit/reactive-element/index.js" {
+		t.Errorf("lit scope lost transitive resolution: %q", got)
+	}
+}
+
+func TestTraceBatchFiltersUnrelatedScopes(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/scope-closure", "/test")
+	opts := Options{}
+	for result := range TraceBatch(mfs, []string{"/test/index.html", "/test/other.html"}, "/test", opts) {
+		if result.Error != "" {
+			t.Fatalf("unexpected error: %s", result.Error)
+		}
+		for scope := range result.Scopes {
+			if strings.Contains(scope, "unrelated") {
+				t.Errorf("unrelated scope leaked into batch result: %q (%v)", scope, result.Scopes)
+			}
+		}
+		if got := result.Scopes["/node_modules/lit/"]["@lit/reactive-element"]; got != "/node_modules/@lit/reactive-element/index.js" {
+			t.Errorf("batch result lost transitive resolution: %q", got)
+		}
+	}
+}
+
+// TestTraceFiltersUnrelatedWildcardTrailingSlash ensures a package with a
+// wildcard export does not leak its trailing-slash key (and therefore its
+// scope) into the map when the page never imports it.
+func TestTraceFiltersUnrelatedWildcardTrailingSlash(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/scope-closure-wildcard", "/test")
+	result, err := TraceSingle(mfs, "/test/index.html", "/test", Options{})
+	if err != nil {
+		t.Fatalf("TraceSingle failed: %v", err)
+	}
+	if _, ok := result.ImportMap.Imports["unrelated/"]; ok {
+		t.Errorf("unrelated wildcard key leaked into imports: %v", result.ImportMap.Imports)
+	}
+	for scope := range result.ImportMap.Scopes {
+		if strings.Contains(scope, "unrelated") {
+			t.Errorf("unrelated wildcard scope leaked into map: %q (%v)", scope, result.ImportMap.Scopes)
+		}
+	}
+	// Reachability for the packages that are imported must still work.
+	if got := result.ImportMap.Scopes["/node_modules/lit/"]["@lit/reactive-element"]; got != "/node_modules/@lit/reactive-element/index.js" {
+		t.Errorf("lit lost transitive resolution: %q", got)
+	}
+	if got := result.ImportMap.Scopes["/node_modules/@lit/reactive-element/"]["lit-html"]; got != "/node_modules/lit-html/index.js" {
+		t.Errorf("reactive-element lost transitive resolution: %q", got)
+	}
+}
+
+// TestTraceConditionsTransitiveScope covers tracer-side condition selection:
+// the entry file picked by the condition imports a different bare specifier,
+// and the condition also changes the transitive scope entry.
+func TestTraceConditionsTransitiveScope(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/conditions", "/test")
+
+	browser, err := TraceSingle(mfs, "/test/index.html", "/test", Options{Conditions: []string{"browser"}})
+	if err != nil {
+		t.Fatalf("TraceSingle with browser condition failed: %v", err)
+	}
+	if _, ok := browser.ImportMap.Imports["browser-only"]; !ok {
+		t.Errorf("browser trace should follow browser-only, got %v", browser.ImportMap.Imports)
+	}
+	if _, ok := browser.ImportMap.Imports["default-only"]; ok {
+		t.Errorf("browser trace should not follow default-only, got %v", browser.ImportMap.Imports)
+	}
+	if got := browser.ImportMap.Scopes["/node_modules/cond-pkg/"]["cond-child"]; got != "/node_modules/cond-child/browser.js" {
+		t.Errorf("browser transitive scope = %q, want browser.js (%v)", got, browser.ImportMap.Scopes)
+	}
+
+	def, err := TraceSingle(mfs, "/test/index.html", "/test", Options{Conditions: []string{"default"}})
+	if err != nil {
+		t.Fatalf("TraceSingle with default condition failed: %v", err)
+	}
+	if _, ok := def.ImportMap.Imports["default-only"]; !ok {
+		t.Errorf("default trace should follow default-only, got %v", def.ImportMap.Imports)
+	}
+	if _, ok := def.ImportMap.Imports["browser-only"]; ok {
+		t.Errorf("default trace should not follow browser-only, got %v", def.ImportMap.Imports)
+	}
+	if got := def.ImportMap.Scopes["/node_modules/cond-pkg/"]["cond-child"]; got != "/node_modules/cond-child/index.js" {
+		t.Errorf("default transitive scope = %q, want index.js (%v)", got, def.ImportMap.Scopes)
+	}
+}
+
+// TestTraceWorkspaceNodeModules covers following a bare specifier into the
+// workspace-root node_modules tree from a workspace member.
+func TestTraceWorkspaceNodeModules(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/workspace", "/test")
+	result, err := TraceSingle(mfs, "/test/packages/app/index.html", "/test/packages/app", Options{})
+	if err != nil {
+		t.Fatalf("TraceSingle failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("expected node_modules to be traceable, got errors: %v", result.Errors)
+	}
+	if got := result.ImportMap.Imports["lit"]; got != "/node_modules/lit/index.js" {
+		t.Errorf("lit = %q, want node_modules path (%v)", got, result.ImportMap.Imports)
+	}
+	if got := result.ImportMap.Scopes["/node_modules/lit/"]["@lit/reactive-element"]; got != "/node_modules/@lit/reactive-element/index.js" {
+		t.Errorf("lit transitive scope = %q (%v)", got, result.ImportMap.Scopes)
+	}
+}
+
+// TestTraceBatchResultsAreIndependent ensures the per-specifier-set memo does
+// not hand out maps that siblings mutate through one another.
+func TestTraceBatchResultsAreIndependent(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/scope-closure", "/test")
+	var results []BatchResult
+	for result := range TraceBatch(mfs, []string{"/test/index.html", "/test/other.html"}, "/test", Options{Parallel: 1}) {
+		if result.Error != "" {
+			t.Fatalf("unexpected error: %s", result.Error)
+		}
+		results = append(results, result)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	results[0].Imports["lit"] = "mutated"
+	for scope := range results[0].Scopes {
+		results[0].Scopes[scope]["@lit/reactive-element"] = "mutated"
+	}
+
+	for _, result := range results[1:] {
+		if got := result.Imports["lit"]; got == "mutated" {
+			t.Errorf("mutating one result changed a sibling's imports")
+		}
+		for scope, entries := range result.Scopes {
+			if entries["@lit/reactive-element"] == "mutated" {
+				t.Errorf("mutating one result changed a sibling's scope %q", scope)
+			}
+		}
+	}
+}
+
+func TestExtractScriptsIgnoresInertSubtrees(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/inert-scripts", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+	scripts, err := ExtractScripts(html)
+	if err != nil {
+		t.Fatalf("ExtractScripts failed: %v", err)
+	}
+	if len(scripts) != 1 {
+		t.Fatalf("expected only the live script, got %d: %+v", len(scripts), scripts)
+	}
+	if scripts[0].Src != "./live.js" {
+		t.Errorf("expected ./live.js, got %q", scripts[0].Src)
+	}
+}
+
+func TestFindInsertPointIgnoresInertScripts(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/inert-insertpoint", "/test")
+	html, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+	point := FindInsertPoint(html)
+	if !point.Found {
+		t.Fatal("expected an insert point")
+	}
+	after := string(html[point.Offset:])
+	if !strings.HasPrefix(after, "</head>") {
+		t.Errorf("expected insertion before </head>, got %q", after)
+	}
+}

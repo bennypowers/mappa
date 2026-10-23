@@ -142,7 +142,7 @@ func TestValidateImports_SelfReference(t *testing.T) {
 				Path: "/test/app.js",
 				Imports: []ModuleImport{
 					{Specifier: "lit", Line: 1},
-					{Specifier: "@rhds/elements", Line: 2},           // self-reference
+					{Specifier: "@rhds/elements", Line: 2},            // self-reference
 					{Specifier: "@rhds/elements/lib/foo.js", Line: 3}, // self-reference subpath
 				},
 				Traced: true,

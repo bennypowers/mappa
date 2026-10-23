@@ -33,8 +33,8 @@ var (
 	GitDirty  = ""        // "dirty" if working directory has uncommitted changes
 )
 
-// GetVersion returns the version string for the application
-func GetVersion() string {
+// VersionString returns the version string for the application.
+func VersionString() string {
 	// If Version was set via ldflags, use it
 	if Version != "dev" {
 		return Version
@@ -70,19 +70,10 @@ func GetVersion() string {
 	return "dev"
 }
 
-// GetFullVersion returns detailed version information
-func GetFullVersion() string {
-	version := GetVersion()
-	if GitCommit != "unknown" {
-		return fmt.Sprintf("%s (commit: %s)", version, GitCommit)
-	}
-	return version
-}
-
-// GetBuildInfo returns detailed build information
-func GetBuildInfo() map[string]string {
+// BuildInfo returns detailed build information.
+func BuildInfo() map[string]string {
 	return map[string]string{
-		"version":   GetVersion(),
+		"version":   VersionString(),
 		"gitCommit": GitCommit,
 		"gitTag":    GitTag,
 		"buildTime": BuildTime,

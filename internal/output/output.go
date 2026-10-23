@@ -20,12 +20,49 @@ package output
 
 import (
 	"fmt"
+	"io"
+	"sync"
 
 	"github.com/spf13/viper"
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
 )
+
+// WarningLogger writes warnings to a writer and retains them for inspection.
+// It implements resolve.Logger.
+type WarningLogger struct {
+	mu       sync.Mutex
+	w        io.Writer
+	warnings []string
+}
+
+// NewWarningLogger creates a logger that writes to w.
+func NewWarningLogger(w io.Writer) *WarningLogger {
+	return &WarningLogger{w: w}
+}
+
+// Warning implements resolve.Logger.
+func (l *WarningLogger) Warning(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	l.mu.Lock()
+	l.warnings = append(l.warnings, msg)
+	w := l.w
+	l.mu.Unlock()
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "Warning: %s\n", msg)
+	}
+}
+
+// Debug implements resolve.Logger. Debug messages are discarded.
+func (l *WarningLogger) Debug(format string, args ...any) {}
+
+// Warnings returns a copy of the collected warnings.
+func (l *WarningLogger) Warnings() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.warnings...)
+}
 
 // ImportMap formats and outputs an import map to stdout or a file.
 // If viper's "output" flag is set, writes to that file; otherwise prints to stdout.

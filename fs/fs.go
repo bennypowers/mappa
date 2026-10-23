@@ -21,6 +21,7 @@ package fs
 import (
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // FileSystem provides an abstraction over filesystem operations.
@@ -45,8 +46,36 @@ type FileSystem interface {
 	Open(name string) (fs.File, error)
 }
 
+// SymlinkResolver is an optional capability for file systems that can resolve
+// symbolic links. Callers that enforce containment should use it when
+// available so a link cannot point outside an allowed root; file systems that
+// do not implement it keep working with lexical containment.
+type SymlinkResolver interface {
+	EvalSymlinks(path string) (string, error)
+}
+
+// RootedFS is an optional capability for file systems that can confine
+// operations to a directory tree. Callers should prefer it for reads of
+// untrusted content so containment is enforced by the OS rather than by a
+// check followed by a read.
+type RootedFS interface {
+	OpenRoot(name string) (*os.Root, error)
+}
+
+// AtomicWriter is an optional capability for file systems that can replace a
+// file without exposing a truncated intermediate state.
+type AtomicWriter interface {
+	WriteFileAtomic(name string, data []byte, perm fs.FileMode) error
+}
+
 // OSFileSystem implements FileSystem using the standard os package.
 type OSFileSystem struct{}
+
+var (
+	_ SymlinkResolver = (*OSFileSystem)(nil)
+	_ RootedFS        = (*OSFileSystem)(nil)
+	_ AtomicWriter    = (*OSFileSystem)(nil)
+)
 
 // NewOSFileSystem creates a new filesystem that uses the standard os package.
 func NewOSFileSystem() *OSFileSystem {
@@ -97,4 +126,59 @@ func (f *OSFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
 // Open opens the named file for reading.
 func (f *OSFileSystem) Open(name string) (fs.File, error) {
 	return os.Open(name)
+}
+
+// EvalSymlinks returns the path name after evaluating any symbolic links.
+func (f *OSFileSystem) EvalSymlinks(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
+
+// OpenRoot opens name as a directory tree that confines subsequent operations.
+func (f *OSFileSystem) OpenRoot(name string) (*os.Root, error) {
+	return os.OpenRoot(name)
+}
+
+// WriteFileAtomic writes data to a temporary file in the target's directory
+// and renames it over the target, so readers never observe a partial file.
+// Existing destination permissions are preserved. A symlink destination is
+// resolved so the link itself survives and its target is replaced.
+func (f *OSFileSystem) WriteFileAtomic(name string, data []byte, perm fs.FileMode) error {
+	target := name
+	if resolved, err := filepath.EvalSymlinks(name); err == nil {
+		target = resolved
+	}
+	mode := perm
+	if info, err := os.Stat(target); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, ".mappa-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }

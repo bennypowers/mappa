@@ -40,12 +40,20 @@ type InsertPoint struct {
 	Indent string // Whitespace to use for indentation
 }
 
+// isInertElement reports whether the element's subtree is inert for import
+// purposes: templates are never executed and noscript content only applies
+// when scripting is disabled.
+func isInertElement(name string) bool {
+	return name == "template" || name == "noscript"
+}
+
 // FindImportMapTag locates the first <script type="importmap"> tag in HTML content.
 // Returns byte positions for the tag and its content.
 func FindImportMapTag(content []byte) ImportMapLocation {
 	tokenizer := html.NewTokenizer(bytes.NewReader(content))
 	offset := 0
 	line := 1
+	inertDepth := 0
 
 	for {
 		tt := tokenizer.Next()
@@ -61,12 +69,27 @@ func FindImportMapTag(content []byte) ImportMapLocation {
 
 		if tt == html.StartTagToken {
 			tagName, hasAttr := tokenizer.TagName()
-			if string(tagName) == "script" && hasAttr {
+			name := string(tagName)
+
+			if isInertElement(name) {
+				inertDepth++
+				offset += rawLen
+				line += linesBefore
+				continue
+			}
+
+			if inertDepth > 0 {
+				offset += rawLen
+				line += linesBefore
+				continue
+			}
+
+			if name == "script" && hasAttr {
 				// Check if type="importmap"
 				isImportMap := false
 				for {
 					key, val, more := tokenizer.TagAttr()
-					if string(key) == "type" && string(val) == "importmap" {
+					if string(key) == "type" && strings.EqualFold(string(val), "importmap") {
 						isImportMap = true
 					}
 					if !more {
@@ -123,21 +146,37 @@ func FindImportMapTag(content []byte) ImportMapLocation {
 			}
 		}
 
+		if tt == html.EndTagToken && inertDepth > 0 {
+			tagName, _ := tokenizer.TagName()
+			if isInertElement(string(tagName)) {
+				inertDepth--
+			}
+		}
+
 		offset += rawLen
 		line += linesBefore
 	}
 
 	return ImportMapLocation{Found: false}
-}
-
-// FindInsertPoint locates where to insert a new import map in HTML content.
-// Prefers: before first <script> in <head>, or before </head> if no scripts.
+} // FindInsertPoint locates where to insert a new import map in HTML content.
+// It falls back through the following locations, in order:
+//  1. before the first <script> in <head>
+//  2. before </head>
+//  3. before the first <script> anywhere in the document
+//  4. before </body>
+//  5. at the end of the content
+//
+// The returned InsertPoint always has Found set to true; an empty document
+// yields an insertion point at EOF.
 func FindInsertPoint(content []byte) InsertPoint {
 	tokenizer := html.NewTokenizer(bytes.NewReader(content))
 	offset := 0
+	inertDepth := 0
 	inHead := false
 	headEnd := -1
+	bodyEnd := -1
 	firstScriptInHead := -1
+	firstScriptAny := -1
 	var indent string
 
 	for {
@@ -154,23 +193,54 @@ func FindInsertPoint(content []byte) InsertPoint {
 			tagName, _ := tokenizer.TagName()
 			tagNameStr := string(tagName)
 
-			if tagNameStr == "head" {
-				inHead = true
-			} else if tagNameStr == "script" && inHead && firstScriptInHead == -1 {
-				// Found first script in head - insert before it
-				firstScriptInHead = offset
+			if isInertElement(tagNameStr) {
+				inertDepth++
+				break
+			}
+			if inertDepth > 0 {
+				break
+			}
 
-				// Capture preceding whitespace for indentation
-				indent = extractIndent(content, offset)
+			switch tagNameStr {
+			case "head":
+				inHead = true
+			case "script":
+				if firstScriptAny == -1 {
+					firstScriptAny = offset
+				}
+				if inHead && firstScriptInHead == -1 {
+					// Found first script in head - insert before it
+					firstScriptInHead = offset
+
+					// Capture preceding whitespace for indentation
+					indent = extractIndent(content, offset)
+				}
 			}
 		case html.EndTagToken:
 			tagName, _ := tokenizer.TagName()
-			if string(tagName) == "head" && inHead {
-				headEnd = offset
-				if indent == "" {
-					indent = extractIndent(content, offset)
+			tagNameStr := string(tagName)
+
+			if isInertElement(tagNameStr) {
+				if inertDepth > 0 {
+					inertDepth--
 				}
-				inHead = false
+				break
+			}
+			if inertDepth > 0 {
+				break
+			}
+
+			switch tagNameStr {
+			case "head":
+				if inHead {
+					headEnd = offset
+					if indent == "" {
+						indent = extractIndent(content, offset)
+					}
+					inHead = false
+				}
+			case "body":
+				bodyEnd = offset
 			}
 		}
 
@@ -195,7 +265,23 @@ func FindInsertPoint(content []byte) InsertPoint {
 		}
 	}
 
-	return InsertPoint{Found: false}
+	// No head: insert before the first script, else before </body>, else at EOF.
+	if firstScriptAny != -1 {
+		return InsertPoint{
+			Found:  true,
+			Offset: firstScriptAny,
+			Indent: extractIndent(content, firstScriptAny),
+		}
+	}
+	if bodyEnd != -1 {
+		return InsertPoint{
+			Found:  true,
+			Offset: bodyEnd,
+			Indent: extractIndent(content, bodyEnd),
+		}
+	}
+
+	return InsertPoint{Found: true, Offset: len(content)}
 }
 
 // extractIndent extracts leading whitespace from the line containing the given offset.
@@ -234,7 +320,12 @@ func ExtractScripts(content []byte) ([]ScriptTag, error) {
 }
 
 // extractScriptsFromNode recursively walks the HTML tree to find script elements.
+// Scripts inside inert subtrees (<template>, <noscript>) are skipped because
+// they are not executed in the live document.
 func extractScriptsFromNode(n *html.Node, scripts *[]ScriptTag) {
+	if n.Type == html.ElementNode && isInertElement(n.Data) {
+		return
+	}
 	if n.Type == html.ElementNode && n.Data == "script" {
 		script := ScriptTag{}
 
@@ -242,7 +333,7 @@ func extractScriptsFromNode(n *html.Node, scripts *[]ScriptTag) {
 		for _, attr := range n.Attr {
 			switch attr.Key {
 			case "type":
-				script.Type = attr.Val
+				script.Type = strings.ToLower(attr.Val)
 			case "src":
 				script.Src = attr.Val
 			}

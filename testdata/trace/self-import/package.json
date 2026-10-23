@@ -1,0 +1,8 @@
+{
+  "name": "my-lib",
+  "version": "1.0.0",
+  "exports": {
+    ".": "./index.js",
+    "./button": "./button.js"
+  }
+}
