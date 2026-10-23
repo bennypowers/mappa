@@ -20,10 +20,13 @@ package cdn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
@@ -34,32 +37,44 @@ import (
 
 // Resolver generates import maps pointing to CDN-hosted packages.
 type Resolver struct {
-	fetcher      mappacdn.Fetcher
-	provider     mappacdn.Provider
-	registry     *mappacdn.Registry
-	template     *resolve.Template
-	cache        *mappacdn.PackageCache
-	logger       resolve.Logger
-	conditions   []string
-	includeDev   bool
+	fetcher         mappacdn.Fetcher
+	provider        mappacdn.Provider
+	registry        *mappacdn.Registry
+	template        *resolve.Template
+	cache           *mappacdn.PackageCache
+	logger          resolve.Logger
+	conditions      []string
+	includeDev      bool
 	excludePackages []string
 	maxDepth        int           // Maximum dependency depth (0 = unlimited)
 	resolveScope    bool          // Whether to resolve transitive dependencies as scopes
 	requestTimeout  time.Duration // Per-request timeout (0 = no timeout)
 	concurrency     int           // Max concurrent goroutines across all depths
+	allowPartial    bool          // Return a partial map plus warnings instead of an error
 }
+
+// DefaultRequestTimeout bounds each registry and CDN request.
+const DefaultRequestTimeout = 30 * time.Second
+
+// maxDependencyEntries caps the number of dependencies accepted from a single
+// package.json, preventing unbounded fan-out from untrusted manifests.
+const maxDependencyEntries = 10000
 
 // New creates a new CDN resolver with default settings.
 func New(fetcher mappacdn.Fetcher) *Resolver {
 	tmpl, _ := resolve.ParseTemplate(mappacdn.DefaultProvider.ModuleTemplate)
 	return &Resolver{
-		fetcher:      fetcher,
-		provider:     mappacdn.DefaultProvider,
-		registry:     mappacdn.NewRegistry(fetcher),
-		template:     tmpl,
-		cache:        mappacdn.NewPackageCache(100),
-		resolveScope: true,
-		concurrency:  10,
+		fetcher:  fetcher,
+		provider: mappacdn.DefaultProvider,
+		registry: mappacdn.NewRegistry(fetcher),
+		template: tmpl,
+		// At the 10 MiB manifest cap, 100 entries bound the theoretical worst
+		// case to about 1 GiB. Typical manifests are a few KiB, so this is
+		// ample for large dependency graphs without risking unbounded growth.
+		cache:          mappacdn.NewPackageCache(100),
+		resolveScope:   true,
+		concurrency:    10,
+		requestTimeout: DefaultRequestTimeout,
 	}
 }
 
@@ -128,7 +143,7 @@ func (r *Resolver) WithExclude(packages []string) *Resolver {
 }
 
 // WithRequestTimeout returns a new Resolver with a per-request timeout.
-// 0 means no timeout (default). Applied to each HTTP fetch and registry call.
+// 0 disables the timeout. The default is DefaultRequestTimeout (30s).
 func (r *Resolver) WithRequestTimeout(d time.Duration) *Resolver {
 	c := r.clone()
 	c.requestTimeout = d
@@ -142,6 +157,16 @@ func (r *Resolver) WithConcurrency(n int) *Resolver {
 	if n > 0 {
 		c.concurrency = n
 	}
+	return c
+}
+
+// WithAllowPartial controls what happens when some dependencies cannot be
+// resolved. By default ResolvePackageJSON returns the partial map together with
+// an error. When allowPartial is true, it instead returns the partial map with
+// its Warnings field populated and a nil error.
+func (r *Resolver) WithAllowPartial(allowPartial bool) *Resolver {
+	c := r.clone()
+	c.allowPartial = allowPartial
 	return c
 }
 
@@ -160,6 +185,7 @@ func (r *Resolver) clone() *Resolver {
 		resolveScope:    r.resolveScope,
 		requestTimeout:  r.requestTimeout,
 		concurrency:     r.concurrency,
+		allowPartial:    r.allowPartial,
 	}
 }
 
@@ -172,6 +198,10 @@ func (r *Resolver) resolveOpts() *packagejson.ResolveOptions {
 }
 
 // ResolvePackageJSON generates an ImportMap from a parsed package.json.
+// When the returned error is non-nil, the returned import map may be partial:
+// dependencies that resolved successfully are included, but callers should
+// treat the map as incomplete. With WithAllowPartial(true), the partial map is
+// returned with Warnings populated and a nil error instead.
 func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.PackageJSON) (*importmap.ImportMap, error) {
 	result := &importmap.ImportMap{
 		Imports: make(map[string]string),
@@ -195,153 +225,256 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 		delete(deps, pkg)
 	}
 
-	// Resolve each dependency
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	sem := make(chan struct{}, r.concurrency)
-	visited := sync.Map{}
-
-	for name, versionRange := range deps {
-		wg.Add(1)
-		go func(pkgName, verRange string) {
-			defer wg.Done()
-			if err := r.resolvePackage(ctx, result, &mu, &visited, sem, pkgName, verRange, 0); err != nil {
-				if r.logger != nil {
-					r.logger.Warning("Failed to resolve %s@%s: %v", pkgName, verRange, err)
-				}
-			}
-		}(name, versionRange)
+	if len(deps) > maxDependencyEntries {
+		return nil, fmt.Errorf("package.json declares %d dependencies (maximum %d)", len(deps), maxDependencyEntries)
 	}
-	wg.Wait()
+	if len(deps) == 0 {
+		return result, nil
+	}
+
+	state := newResolveState(ctx, r, result)
+	// Sort root dependencies so work (and therefore failures) happen in a
+	// deterministic order.
+	for _, name := range slices.Sorted(maps.Keys(deps)) {
+		state.enqueue(&resolveTask{name: name, versionRange: deps[name]})
+	}
+
+	// The worker pool bounds goroutines and HTTP requests across every depth,
+	// not just the declared dependencies.
+	workers := max(r.concurrency, 1)
+	for range workers {
+		state.workers.Add(1)
+		go state.worker()
+	}
+	state.workers.Wait()
 
 	// Clean up empty scopes
 	if len(result.Scopes) == 0 {
 		result.Scopes = nil
 	}
 
+	if len(state.errs) > 0 {
+		// Errors are recorded in completion order; sort by key to keep the
+		// joined error deterministic.
+		keys := slices.Sorted(maps.Keys(state.errs))
+		errs := make([]error, len(keys))
+		warnings := make([]string, len(keys))
+		for i, key := range keys {
+			errs[i] = state.errs[key]
+			warnings[i] = state.errs[key].Error()
+		}
+		if r.allowPartial {
+			result.Warnings = warnings
+			return result, nil
+		}
+		return result, errors.Join(errs...)
+	}
 	return result, nil
 }
 
-// resolvePackage resolves a single package and its dependencies.
-// sem is shared across all recursion depths to bound total concurrency.
-// Acquires sem only for HTTP work, releases before spawning children
-// to prevent deadlock when parents hold slots while waiting on children.
-func (r *Resolver) resolvePackage(
-	ctx context.Context,
-	im *importmap.ImportMap,
-	mu *sync.Mutex,
-	visited *sync.Map,
-	sem chan struct{},
-	pkgName, versionRange string,
-	depth int,
-) error {
-	if r.maxDepth > 0 && depth >= r.maxDepth {
-		return nil
-	}
-
-	if err := r.acquireSem(ctx, sem); err != nil {
-		return err
-	}
-
-	version, err := r.resolveVersion(ctx, pkgName, versionRange)
-	if err != nil {
-		<-sem
-		return err
-	}
-
-	cacheKey := pkgName + "@" + version
-	if _, loaded := visited.LoadOrStore(cacheKey, true); loaded {
-		<-sem
-		return nil
-	}
-
-	pkg, err := r.fetchPackageJSON(ctx, pkgName, version)
-	// Release sem -- HTTP work done, recursive work doesn't need it
-	<-sem
-	if err != nil {
-		return err
-	}
-
-	r.addPackageImports(im, mu, pkgName, version, pkg)
-
-	if r.resolveScope && (r.maxDepth == 0 || depth < r.maxDepth) && len(pkg.Dependencies) > 0 {
-		scopeKey := r.template.Expand(pkgName, version, "")
-		if !strings.HasSuffix(scopeKey, "/") {
-			scopeKey += "/"
-		}
-
-		scopeEntries := make(map[string]string)
-		var wg sync.WaitGroup
-		var scopeMu sync.Mutex
-
-		for depName, depVer := range pkg.Dependencies {
-			if slices.Contains(r.excludePackages, depName) {
-				continue
-			}
-			wg.Add(1)
-			go func(name, ver string) {
-				defer wg.Done()
-
-				if err := r.acquireSem(ctx, sem); err != nil {
-					return
-				}
-
-				resolvedVer, err := r.resolveVersion(ctx, name, ver)
-				if err != nil {
-					<-sem
-					if r.logger != nil {
-						r.logger.Warning("Failed to resolve transitive dep %s@%s: %v", name, ver, err)
-					}
-					return
-				}
-
-				depPkg, err := r.fetchPackageJSON(ctx, name, resolvedVer)
-				<-sem
-				if err != nil {
-					if r.logger != nil {
-						r.logger.Warning("Failed to fetch %s@%s: %v", name, resolvedVer, err)
-					}
-					return
-				}
-
-				entries := r.buildPackageImports(name, resolvedVer, depPkg)
-				scopeMu.Lock()
-				maps.Copy(scopeEntries, entries)
-				scopeMu.Unlock()
-
-				if err := r.resolvePackage(ctx, im, mu, visited, sem, name, resolvedVer, depth+1); err != nil {
-					if r.logger != nil {
-						r.logger.Warning("Failed to resolve transitive dep %s: %v", name, err)
-					}
-				}
-			}(depName, depVer)
-		}
-		wg.Wait()
-
-		if len(scopeEntries) > 0 {
-			mu.Lock()
-			if im.Scopes == nil {
-				im.Scopes = make(map[string]map[string]string)
-			}
-			if im.Scopes[scopeKey] == nil {
-				im.Scopes[scopeKey] = make(map[string]string)
-			}
-			maps.Copy(im.Scopes[scopeKey], scopeEntries)
-			mu.Unlock()
-		}
-	}
-
-	return nil
+// resolveTask describes one package to resolve. parentScope is the scope key
+// of the package that depends on it, and is empty for declared dependencies.
+type resolveTask struct {
+	name         string
+	versionRange string
+	depth        int
+	parentScope  string
 }
 
-// acquireSem blocks until a semaphore slot is available or the context is cancelled.
-func (r *Resolver) acquireSem(ctx context.Context, sem chan struct{}) error {
-	select {
-	case sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+// resolveState holds the shared work queue, visited set, and error collector
+// for a single ResolvePackageJSON call.
+type resolveState struct {
+	ctx      context.Context
+	resolver *Resolver
+	im       *importmap.ImportMap
+	mu       sync.Mutex
+	errs     map[string]error
+	visited  sync.Map
+	queue    *taskQueue
+	pending  atomic.Int64
+	workers  sync.WaitGroup
+}
+
+func newResolveState(ctx context.Context, resolver *Resolver, im *importmap.ImportMap) *resolveState {
+	return &resolveState{
+		ctx:      ctx,
+		resolver: resolver,
+		im:       im,
+		errs:     make(map[string]error),
+		queue:    newTaskQueue(),
 	}
+}
+
+// enqueue adds a task and counts it as pending.
+func (s *resolveState) enqueue(task *resolveTask) {
+	s.pending.Add(1)
+	s.queue.push(task)
+}
+
+func (s *resolveState) worker() {
+	defer s.workers.Done()
+	for {
+		task, ok := s.queue.pop()
+		if !ok {
+			return
+		}
+		s.process(task)
+		if s.pending.Add(-1) == 0 {
+			s.queue.close()
+		}
+	}
+}
+
+// process resolves one package, records its imports in the appropriate scope,
+// and enqueues its dependencies. Both successful and failed transitive
+// resolutions are aggregated into the returned error.
+func (s *resolveState) process(task *resolveTask) {
+	r := s.resolver
+	ctx := s.ctx
+
+	if err := ctx.Err(); err != nil {
+		s.recordError(task, err)
+		return
+	}
+
+	version, err := r.resolveVersion(ctx, task.name, task.versionRange)
+	if err != nil {
+		s.recordError(task, err)
+		return
+	}
+
+	pkg, err := r.fetchPackageJSON(ctx, task.name, version)
+	if err != nil {
+		// The package is not marked visited, so another branch referencing it
+		// can retry the fetch.
+		s.recordError(task, err)
+		return
+	}
+
+	if task.depth == 0 {
+		// Depth 0 always adds the declared dependency's top-level imports,
+		// even if a transitive scope already visited the same version.
+		r.addPackageImports(s.im, &s.mu, task.name, version, pkg)
+	} else if task.parentScope != "" {
+		entries := r.buildPackageImports(task.name, version, pkg)
+		s.mu.Lock()
+		if s.im.Scopes == nil {
+			s.im.Scopes = make(map[string]map[string]string)
+		}
+		if s.im.Scopes[task.parentScope] == nil {
+			s.im.Scopes[task.parentScope] = make(map[string]string)
+		}
+		maps.Copy(s.im.Scopes[task.parentScope], entries)
+		s.mu.Unlock()
+	}
+
+	// A package's own dependencies only need enqueueing once per resolved
+	// version, and only by a task that may actually traverse them. A task at
+	// the depth limit still contributes imports and scope entries above, but
+	// must not consume the visit: a later, shallower task may still need to
+	// traverse this version.
+	canTraverse := r.resolveScope && len(pkg.Dependencies) > 0 &&
+		(r.maxDepth == 0 || task.depth < r.maxDepth)
+	cacheKey := task.name + "@" + version
+	if canTraverse {
+		if _, alreadyVisited := s.visited.LoadOrStore(cacheKey, true); alreadyVisited {
+			return
+		}
+	}
+
+	if !canTraverse {
+		return
+	}
+	if len(pkg.Dependencies) > maxDependencyEntries {
+		s.recordError(task, fmt.Errorf("declares %d dependencies (maximum %d)", len(pkg.Dependencies), maxDependencyEntries))
+		return
+	}
+
+	scopeKey := r.template.Expand(task.name, version, "")
+	if !strings.HasSuffix(scopeKey, "/") {
+		scopeKey += "/"
+	}
+
+	for _, depName := range slices.Sorted(maps.Keys(pkg.Dependencies)) {
+		if slices.Contains(r.excludePackages, depName) {
+			continue
+		}
+		s.enqueue(&resolveTask{
+			name:         depName,
+			versionRange: pkg.Dependencies[depName],
+			depth:        task.depth + 1,
+			parentScope:  scopeKey,
+		})
+	}
+}
+
+// recordError stores an error keyed deterministically, prefixed with the
+// parent scope and dependency name for transitive failures.
+func (s *resolveState) recordError(task *resolveTask, err error) {
+	var key string
+	if task.parentScope == "" {
+		key = task.name + "@" + task.versionRange
+		err = fmt.Errorf("%s@%s: %w", task.name, task.versionRange, err)
+	} else {
+		key = task.parentScope + " " + task.name + "@" + task.versionRange
+		err = fmt.Errorf("%s: %s@%s: %w", strings.TrimSuffix(task.parentScope, "/"), task.name, task.versionRange, err)
+	}
+
+	s.mu.Lock()
+	s.errs[key] = err
+	s.mu.Unlock()
+
+	if s.resolver.logger != nil {
+		s.resolver.logger.Warning("Failed to resolve %s@%s: %v", task.name, task.versionRange, err)
+	}
+}
+
+// taskQueue is an unbounded FIFO queue with blocking pops. An unbounded queue
+// avoids deadlock when every worker is producing more work.
+type taskQueue struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	items  []*resolveTask
+	head   int
+	closed bool
+}
+
+func newTaskQueue() *taskQueue {
+	q := &taskQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *taskQueue) push(task *resolveTask) {
+	q.mu.Lock()
+	if !q.closed {
+		q.items = append(q.items, task)
+		q.cond.Signal()
+	}
+	q.mu.Unlock()
+}
+
+// pop blocks until a task is available or the queue is closed.
+func (q *taskQueue) pop() (*resolveTask, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.head >= len(q.items) && !q.closed {
+		q.cond.Wait()
+	}
+	if q.head >= len(q.items) {
+		return nil, false
+	}
+	task := q.items[q.head]
+	q.items[q.head] = nil
+	q.head++
+	return task, true
+}
+
+func (q *taskQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.cond.Broadcast()
+	q.mu.Unlock()
 }
 
 // resolveVersion wraps registry.ResolveVersion with an optional per-request timeout.
@@ -360,6 +493,10 @@ func (r *Resolver) fetchPackageJSON(ctx context.Context, pkgName, version string
 		data, err := r.fetcher.Fetch(reqCtx, url)
 		if err != nil {
 			return nil, err
+		}
+		if len(data) > packagejson.MaxPackageJSONSize {
+			return nil, fmt.Errorf("package.json for %s@%s exceeds maximum size (%d bytes)",
+				pkgName, version, packagejson.MaxPackageJSONSize)
 		}
 		return packagejson.Parse(data)
 	})

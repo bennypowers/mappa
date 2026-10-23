@@ -19,22 +19,25 @@ package cdn
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
+	"bennypowers.dev/mappa/importmap"
 	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/testutil"
 )
 
 // MockFetcher is a test implementation of the Fetcher interface.
 type MockFetcher struct {
-	responses    map[string][]byte
-	errors       map[string]error
-	delays       map[string]time.Duration
-	fetchCount   atomic.Int64
+	responses     map[string][]byte
+	errors        map[string]error
+	delays        map[string]time.Duration
+	fetchCount    atomic.Int64
 	maxConcurrent atomic.Int64
 	inflight      atomic.Int64
 }
@@ -487,16 +490,18 @@ func TestRequestTimeoutCancelsSlowFetch(t *testing.T) {
 	}
 
 	im, err := resolver.ResolvePackageJSON(ctx, pkg)
-	if err != nil {
-		t.Fatalf("ResolvePackageJSON error: %v", err)
+	if err == nil {
+		t.Fatal("Expected timeout to be reported as an error")
 	}
-
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Errorf("Expected deadline error, got: %v", err)
+	}
 	if im.Imports["slow-pkg"] != "" {
 		t.Error("Expected slow-pkg to be missing from imports due to timeout")
 	}
 }
 
-func TestRequestTimeoutDefaultIsNoTimeout(t *testing.T) {
+func TestDefaultRequestTimeoutAllowsFastFetch(t *testing.T) {
 	mockFetcher := NewMockFetcher()
 
 	litRegistry := testutil.LoadFixtureFile(t, "lit-registry/response.json")
@@ -547,8 +552,8 @@ func TestContextCancellationStopsSemAcquisition(t *testing.T) {
 	}
 
 	im, err := resolver.ResolvePackageJSON(ctx, pkg)
-	if err != nil {
-		t.Fatalf("ResolvePackageJSON error: %v", err)
+	if err == nil {
+		t.Fatal("Expected context cancellation to be reported as an error")
 	}
 
 	// With concurrency=1 and 100ms delay per dep, 50ms timeout should prevent
@@ -578,4 +583,468 @@ func TestWithConcurrencyIgnoresZero(t *testing.T) {
 	if resolver.concurrency != 10 {
 		t.Errorf("Expected concurrency to remain 10 for zero input, got %d", resolver.concurrency)
 	}
+}
+
+func TestShallowTaskTraversesAfterDepthTruncatedTask(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	mockFetcher.AddResponse("https://registry.npmjs.org/deep-a",
+		testutil.LoadFixtureFile(t, "deep-a-registry/response.json"))
+	mockFetcher.AddResponse("https://esm.sh/deep-a@1.0.0/package.json",
+		testutil.LoadFixtureFile(t, "deep-a-package/package.json"))
+	mockFetcher.AddResponse("https://registry.npmjs.org/subdep-a1",
+		testutil.LoadFixtureFile(t, "subdep-a1-registry/response.json"))
+	mockFetcher.AddResponse("https://esm.sh/subdep-a1@1.0.0/package.json",
+		testutil.LoadFixtureFile(t, "subdep-a1-package/package.json"))
+
+	resolver := New(mockFetcher).WithMaxDepth(1)
+	im := &importmap.ImportMap{
+		Imports: make(map[string]string),
+		Scopes:  make(map[string]map[string]string),
+	}
+	state := newResolveState(context.Background(), resolver, im)
+
+	// A task at the depth limit cannot traverse, so it must not consume the
+	// package's visit.
+	state.process(&resolveTask{
+		name:         "deep-a",
+		versionRange: "^1.0.0",
+		depth:        1,
+		parentScope:  "https://esm.sh/parent@1.0.0/",
+	})
+	// A later, shallower task for the same package must still traverse.
+	state.process(&resolveTask{name: "deep-a", versionRange: "^1.0.0"})
+
+	// Drain the tasks enqueued by the shallow traversal.
+	for {
+		state.queue.mu.Lock()
+		if state.queue.head >= len(state.queue.items) {
+			state.queue.mu.Unlock()
+			break
+		}
+		task := state.queue.items[state.queue.head]
+		state.queue.head++
+		state.queue.mu.Unlock()
+		state.process(task)
+	}
+
+	scope := im.Scopes["https://esm.sh/deep-a@1.0.0/"]
+	if scope["subdep-a1"] != "https://esm.sh/subdep-a1@1.0.0/index.js" {
+		t.Errorf("expected subdep-a1 in deep-a scope after shallow traversal, got %v", im.Scopes)
+	}
+}
+
+func TestTransitiveDepsOnlyInScopes(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	libARegistry := testutil.LoadFixtureFile(t, "lib-a-registry/response.json")
+	libAPackage := testutil.LoadFixtureFile(t, "lib-a-package/package.json")
+	libBRegistry := testutil.LoadFixtureFile(t, "lib-b-registry/response.json")
+	libBPackage := testutil.LoadFixtureFile(t, "lib-b-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-a", libARegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-a@1.0.0/package.json", libAPackage)
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-b", libBRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-b@1.0.0/package.json", libBPackage)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"lib-a": "^1.0.0"}}
+	im, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+	for key := range im.Imports {
+		if key == "lib-b" || strings.HasPrefix(key, "lib-b/") {
+			t.Errorf("transitive package must not appear in top-level imports: %q", key)
+		}
+	}
+	found := false
+	for _, scope := range im.Scopes {
+		if _, ok := scope["lib-b"]; ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected lib-b in a scope, got %v", im.Scopes)
+	}
+}
+
+func TestResolvePackageJSONReturnsErrors(t *testing.T) {
+	// Registry fetch for the declared dependency 404s.
+	mockFetcher := NewMockFetcher()
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"missing": "^1.0.0"}}
+
+	_, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an error for an unresolved declared dependency")
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("expected error to name the dependency, got: %v", err)
+	}
+}
+
+func TestResolvePackageJSONErrorsAreDeterministic(t *testing.T) {
+	// Registry fetches for all three declared dependencies 404.
+	mockFetcher := NewMockFetcher()
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"alpha": "^1.0.0",
+		"beta":  "^2.0.0",
+		"gamma": "^3.0.0",
+	}}
+
+	const calls = 20
+	var first string
+	for i := range calls {
+		_, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+		if err == nil {
+			t.Fatal("expected an error for unresolved declared dependencies")
+		}
+		if i == 0 {
+			first = err.Error()
+			continue
+		}
+		if got := err.Error(); got != first {
+			t.Fatalf("joined error is not deterministic:\nfirst: %q\ngot:   %q", first, got)
+		}
+	}
+
+	lines := strings.Split(first, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 joined errors, got %d: %q", len(lines), first)
+	}
+	for i, want := range []string{"alpha@^1.0.0:", "beta@^2.0.0:", "gamma@^3.0.0:"} {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Errorf("line %d = %q, want prefix %q", i, lines[i], want)
+		}
+	}
+}
+
+func TestDefaultRequestTimeout(t *testing.T) {
+	resolver := New(NewMockFetcher())
+	if resolver.requestTimeout != DefaultRequestTimeout {
+		t.Errorf("requestTimeout = %v, want %v", resolver.requestTimeout, DefaultRequestTimeout)
+	}
+}
+
+func TestWithRequestTimeoutZeroDisables(t *testing.T) {
+	resolver := New(NewMockFetcher()).WithRequestTimeout(0)
+	if resolver.requestTimeout != 0 {
+		t.Errorf("requestTimeout = %v, want 0 (disabled)", resolver.requestTimeout)
+	}
+}
+
+func TestTransitiveFailureIsAggregated(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	libARegistry := testutil.LoadFixtureFile(t, "lib-a-registry/response.json")
+	libAPackage := testutil.LoadFixtureFile(t, "lib-a-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/lib-a", libARegistry)
+	mockFetcher.AddResponse("https://esm.sh/lib-a@1.0.0/package.json", libAPackage)
+	// lib-b's registry response is deliberately absent: resolving it 404s.
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"lib-a": "^1.0.0"}}
+	im, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an aggregated error for a failed transitive dependency")
+	}
+	if !strings.Contains(err.Error(), "lib-b") {
+		t.Errorf("expected error to name lib-b, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "https://esm.sh/lib-a@1.0.0") {
+		t.Errorf("expected error to be prefixed with the parent scope, got: %v", err)
+	}
+	// The partial map still contains the root package that did resolve.
+	if im.Imports["lib-a"] == "" {
+		t.Error("expected lib-a in partial import map")
+	}
+}
+
+func TestTransitiveFailureRetriesOnAnotherBranch(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	for _, name := range []string{"retry-parent-a", "retry-parent-b"} {
+		reg := testutil.LoadFixtureFile(t, name+"-registry/response.json")
+		pkg := testutil.LoadFixtureFile(t, name+"-package/package.json")
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name, reg)
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json", pkg)
+	}
+	sharedRegistry := testutil.LoadFixtureFile(t, "retry-shared-registry/response.json")
+	sharedPackage := testutil.LoadFixtureFile(t, "retry-shared-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/retry-shared", sharedRegistry)
+	mockFetcher.AddResponse("https://esm.sh/retry-shared@1.0.0/package.json", sharedPackage)
+
+	fetcher := &flakyURLFetcher{
+		MockFetcher: mockFetcher,
+		url:         "https://registry.npmjs.org/retry-shared",
+	}
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"retry-parent-a": "^1.0.0",
+		"retry-parent-b": "^1.0.0",
+	}}
+	// A single worker makes the branch order deterministic: parent-b's task
+	// runs after parent-a's failed attempt, so it retries the same package.
+	im, err := New(fetcher).WithConcurrency(1).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected the transient failure to be aggregated")
+	}
+	if got := fetcher.attempts.Load(); got != 2 {
+		t.Fatalf("expected the failed dependency to be retried once (2 attempts), got %d", got)
+	}
+	if im.Imports["retry-parent-a"] == "" || im.Imports["retry-parent-b"] == "" {
+		t.Error("expected both declared dependencies in the partial map")
+	}
+
+	// The retry succeeded, so the successful branch has a complete scope.
+	scopeKey := "https://esm.sh/retry-parent-b@1.0.0/"
+	scope, ok := im.Scopes[scopeKey]
+	if !ok {
+		t.Fatalf("expected scope %q, got %v", scopeKey, im.Scopes)
+	}
+	if scope["retry-shared"] != "https://esm.sh/retry-shared@1.0.0/index.js" {
+		t.Errorf("expected retry-shared in scope %q, got %v", scopeKey, scope)
+	}
+}
+
+func TestDualRoleDependencyKeepsImportsAndScope(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	for _, name := range []string{"lib-a", "lib-b"} {
+		reg := testutil.LoadFixtureFile(t, name+"-registry/response.json")
+		pkg := testutil.LoadFixtureFile(t, name+"-package/package.json")
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name, reg)
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json", pkg)
+	}
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"lib-a": "^1.0.0",
+		"lib-b": "^1.0.0",
+	}}
+
+	im, err := New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+
+	// lib-b is declared at the root, so it must have top-level imports.
+	if im.Imports["lib-b"] != "https://esm.sh/lib-b@1.0.0/index.js" {
+		t.Errorf("expected top-level lib-b import, got %q", im.Imports["lib-b"])
+	}
+	if im.Imports["lib-b/helpers"] != "https://esm.sh/lib-b@1.0.0/helpers.js" {
+		t.Errorf("expected top-level lib-b/helpers import, got %q", im.Imports["lib-b/helpers"])
+	}
+	// lib-b is also a transitive dep of lib-a, so it must appear in that scope.
+	scope := im.Scopes["https://esm.sh/lib-a@1.0.0/"]
+	if scope["lib-b"] != "https://esm.sh/lib-b@1.0.0/index.js" {
+		t.Errorf("expected lib-b in lib-a scope, got %v", im.Scopes)
+	}
+}
+
+func TestExactPinSurfacesCDN404(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"pinned": "9.9.9",
+	}}
+
+	_, err := New(mockFetcher).WithMaxDepth(1).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent exact version")
+	}
+	if !strings.Contains(err.Error(), "pinned@9.9.9") {
+		t.Errorf("expected error to name package and exact version, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("expected the CDN 404 to surface, got: %v", err)
+	}
+	if !mappacdn.IsNotFound(err) {
+		t.Errorf("expected IsNotFound to unwrap the aggregated error, got %v", err)
+	}
+}
+
+func TestOversizedManifestRejected(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	mockFetcher.AddResponse("https://registry.npmjs.org/huge-manifest",
+		testutil.LoadFixtureFile(t, "huge-manifest-registry/response.json"))
+	oversized := []byte(`{"name":"huge-manifest","version":"1.0.0","description":"` +
+		strings.Repeat("x", packagejson.MaxPackageJSONSize) + `"}`)
+	mockFetcher.AddResponse("https://esm.sh/huge-manifest@1.0.0/package.json", oversized)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"huge-manifest": "^1.0.0"}}
+	_, err := New(mockFetcher).WithMaxDepth(1).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an oversized manifest to be rejected")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestAllowPartialReturnsWarnings(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	litRegistry := testutil.LoadFixtureFile(t, "lit-registry/response.json")
+	litPackage := testutil.LoadFixtureFile(t, "lit-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/lit", litRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lit@3.0.0/package.json", litPackage)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"lit":     "^3.0.0",
+		"missing": "^1.0.0",
+	}}
+
+	// Default: the error is returned and warnings are not set.
+	im, err := New(mockFetcher).WithMaxDepth(1).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an error by default")
+	}
+	if len(im.Warnings) != 0 {
+		t.Errorf("expected no warnings by default, got %v", im.Warnings)
+	}
+
+	// Opt in: the partial map is returned with warnings instead of an error.
+	im, err = New(mockFetcher).
+		WithMaxDepth(1).
+		WithAllowPartial(true).
+		ResolvePackageJSON(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("expected allowPartial to suppress the error, got %v", err)
+	}
+	if im.Imports["lit"] == "" {
+		t.Error("expected lit in the partial import map")
+	}
+	if len(im.Warnings) == 0 {
+		t.Fatal("expected warnings for the unresolved dependency")
+	}
+	if !strings.Contains(strings.Join(im.Warnings, "\n"), "missing@^1.0.0") {
+		t.Errorf("expected warning to name the missing dependency, got %v", im.Warnings)
+	}
+}
+
+func TestMaxDependencyEntriesRoot(t *testing.T) {
+	deps := make(map[string]string, maxDependencyEntries+1)
+	for i := range maxDependencyEntries + 1 {
+		deps[fmt.Sprintf("dep-%d", i)] = "1.0.0"
+	}
+	pkg := &packagejson.PackageJSON{Dependencies: deps}
+
+	_, err := New(NewMockFetcher()).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an error for too many root dependencies")
+	}
+	if !strings.Contains(err.Error(), "maximum") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestMaxDependencyEntriesTransitive(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	mockFetcher.AddResponse("https://registry.npmjs.org/huge-deps",
+		testutil.LoadFixtureFile(t, "huge-deps-registry/response.json"))
+
+	deps := make(map[string]string, maxDependencyEntries+1)
+	for i := range maxDependencyEntries + 1 {
+		deps[fmt.Sprintf("dep-%d", i)] = "1.0.0"
+	}
+	manifest, err := json.Marshal(map[string]any{
+		"name":         "huge-deps",
+		"version":      "1.0.0",
+		"exports":      map[string]string{".": "./index.js"},
+		"dependencies": deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mockFetcher.AddResponse("https://esm.sh/huge-deps@1.0.0/package.json", manifest)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{"huge-deps": "^1.0.0"}}
+	_, err = New(mockFetcher).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an error for too many transitive dependencies")
+	}
+	if !strings.Contains(err.Error(), "maximum") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "huge-deps") {
+		t.Errorf("expected error to name the parent package, got: %v", err)
+	}
+}
+
+func TestMultiFailureAggregatedSortedWithPartialMap(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	goodRegistry := testutil.LoadFixtureFile(t, "lit-registry/response.json")
+	goodPackage := testutil.LoadFixtureFile(t, "lit-package/package.json")
+	mockFetcher.AddResponse("https://registry.npmjs.org/lit", goodRegistry)
+	mockFetcher.AddResponse("https://esm.sh/lit@3.0.0/package.json", goodPackage)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"zzz-missing": "^1.0.0",
+		"lit":         "^3.0.0",
+		"aaa-missing": "^1.0.0",
+	}}
+	im, err := New(mockFetcher).WithConcurrency(2).ResolvePackageJSON(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected an aggregated error")
+	}
+	if im.Imports["lit"] == "" {
+		t.Error("expected the successful dependency in the partial map")
+	}
+
+	lines := strings.Split(err.Error(), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 joined errors, got %d: %q", len(lines), err)
+	}
+	if !strings.HasPrefix(lines[0], "aaa-missing@^1.0.0:") {
+		t.Errorf("line 0 = %q, want aaa-missing first", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "zzz-missing@^1.0.0:") {
+		t.Errorf("line 1 = %q, want zzz-missing second", lines[1])
+	}
+}
+
+func TestHighFanOutBoundedConcurrency(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	const fanOut = 200
+	deps := make(map[string]string, fanOut)
+	for i := range fanOut {
+		name := fmt.Sprintf("fan-%03d", i)
+		deps[name] = "^1.0.0"
+		registry, err := json.Marshal(map[string]any{
+			"name":      name,
+			"dist-tags": map[string]string{"latest": "1.0.0"},
+			"versions":  map[string]any{"1.0.0": map[string]string{"version": "1.0.0"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := json.Marshal(map[string]any{
+			"name":    name,
+			"version": "1.0.0",
+			"exports": map[string]string{".": "./index.js"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name, registry)
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json", manifest)
+		mockFetcher.AddDelay("https://registry.npmjs.org/"+name, time.Millisecond)
+		mockFetcher.AddDelay("https://esm.sh/"+name+"@1.0.0/package.json", time.Millisecond)
+	}
+
+	pkg := &packagejson.PackageJSON{Dependencies: deps}
+	im, err := New(mockFetcher).WithConcurrency(4).ResolvePackageJSON(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+	if len(im.Imports) != fanOut {
+		t.Errorf("expected %d imports, got %d", fanOut, len(im.Imports))
+	}
+	if max := mockFetcher.maxConcurrent.Load(); max > 4 {
+		t.Errorf("expected max concurrent HTTP requests <= 4, got %d", max)
+	}
+}
+
+// flakyURLFetcher fails the first request to url and counts attempts.
+type flakyURLFetcher struct {
+	*MockFetcher
+	url      string
+	attempts atomic.Int32
+}
+
+func (f *flakyURLFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	if url == f.url && f.attempts.Add(1) == 1 {
+		return nil, &mappacdn.FetchError{URL: url, StatusCode: 500, Message: "transient"}
+	}
+	return f.MockFetcher.Fetch(ctx, url)
 }

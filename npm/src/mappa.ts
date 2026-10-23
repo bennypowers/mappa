@@ -13,6 +13,17 @@ export interface GenerateOptions {
   conditions?: string[];
   /** Packages to exclude from the generated map, including as transitive dependencies */
   exclude?: string[];
+  /**
+   * Per-request timeout in milliseconds. Defaults to 30000. Set to 0 to
+   * disable the timeout.
+   */
+  timeoutMs?: number;
+  /**
+   * Return the partial import map (with a `warnings` array) when some
+   * dependencies fail to resolve, instead of rejecting.
+   * @default false
+   */
+  allowPartial?: boolean;
 }
 
 export interface ResolveOptions {
@@ -37,6 +48,8 @@ export interface ResolveOptions {
 export interface ImportMap {
   imports?: Record<string, string>;
   scopes?: Record<string, Record<string, string>>;
+  /** Non-fatal resolution problems, present when `allowPartial` is enabled. */
+  warnings?: string[];
 }
 
 interface GoConstructor {

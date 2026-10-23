@@ -20,9 +20,29 @@ package cdn
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+)
 
-	"github.com/tinywasm/fetch"
+// DefaultMaxResponseSize caps the size of a fetched response body (64 MiB).
+// Real registry packuments (for example vite) exceed 32 MiB, so the default
+// must be large enough to admit them.
+//
+// Native builds stream the body and stop reading once the limit is exceeded,
+// so the cap bounds transfer and memory. WASM builds receive a fully buffered
+// body from tinywasm/fetch and validate the cap after transfer, so there it
+// guards downstream parsing but not the transfer itself.
+const DefaultMaxResponseSize = 64 << 20
+
+// Sentinel errors exposed by FetchError so callers can classify failures
+// without matching on message text.
+var (
+	// ErrTimeout indicates that the request timed out or was aborted.
+	ErrTimeout = errors.New("fetch timed out")
+	// ErrResponseTooLarge indicates that the response exceeded the configured
+	// size limit.
+	ErrResponseTooLarge = errors.New("response exceeds maximum size")
 )
 
 // Fetcher provides an abstraction over HTTP fetching.
@@ -32,47 +52,90 @@ type Fetcher interface {
 	Fetch(ctx context.Context, url string) ([]byte, error)
 }
 
-// HTTPFetcher implements Fetcher using tinywasm/fetch.
-// Works in both native and WASM builds with minimal binary size.
-type HTTPFetcher struct{}
+// HeaderFetcher is an optional Fetcher extension that supports per-request
+// headers. Callers can type-assert a Fetcher to this interface to send media
+// type hints such as the abbreviated npm packument Accept header.
+type HeaderFetcher interface {
+	FetchWithHeaders(ctx context.Context, url string, headers map[string]string) ([]byte, error)
+}
 
-// NewHTTPFetcher creates a new HTTP fetcher.
+// HTTPFetcher implements Fetcher.
+// Native builds stream through net/http and enforce the size limit while
+// reading; WASM builds use tinywasm/fetch, which buffers before delivery.
+type HTTPFetcher struct {
+	maxResponseSize int
+}
+
+// NewHTTPFetcher creates a new HTTP fetcher with DefaultMaxResponseSize.
 func NewHTTPFetcher() *HTTPFetcher {
-	return &HTTPFetcher{}
+	return &HTTPFetcher{maxResponseSize: DefaultMaxResponseSize}
+}
+
+// WithMaxResponseSize returns a copy of the fetcher with the given response
+// size limit in bytes. Values <= 0 restore DefaultMaxResponseSize.
+func (f *HTTPFetcher) WithMaxResponseSize(n int) *HTTPFetcher {
+	if n <= 0 {
+		n = DefaultMaxResponseSize
+	}
+	c := *f
+	c.maxResponseSize = n
+	return &c
 }
 
 // Fetch retrieves content from the given URL.
-// Note: Context cancellation stops waiting for the response but does not
-// abort the underlying HTTP request due to the async callback pattern.
+// Native builds enforce the size limit while streaming and abort the request
+// on context cancellation or deadline.
+// WASM builds check the limit only after the body has been buffered, and
+// cancellation without a deadline stops waiting for the response without
+// aborting the underlying request; a context deadline is forwarded to the
+// request as its timeout and does abort it.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
-	type result struct {
-		body []byte
-		err  error
-	}
-	done := make(chan result, 1)
+	return f.fetch(ctx, url, nil)
+}
 
-	fetch.Get(url).Send(func(resp *fetch.Response, err error) {
-		if err != nil {
-			done <- result{nil, &FetchError{URL: url, Message: err.Error()}}
-			return
-		}
-		if resp.Status != 200 {
-			done <- result{nil, &FetchError{
-				URL:        url,
-				StatusCode: resp.Status,
-				Message:    fmt.Sprintf("HTTP %d", resp.Status),
-			}}
-			return
-		}
-		done <- result{resp.Body(), nil}
-	})
+// FetchWithHeaders retrieves content from the given URL with additional
+// request headers.
+func (f *HTTPFetcher) FetchWithHeaders(ctx context.Context, url string, headers map[string]string) ([]byte, error) {
+	return f.fetch(ctx, url, headers)
+}
 
-	select {
-	case r := <-done:
-		return r.body, r.err
-	case <-ctx.Done():
-		return nil, &FetchError{URL: url, Message: ctx.Err().Error()}
+// effectiveMaxResponseSize returns the configured limit or the default.
+func (f *HTTPFetcher) effectiveMaxResponseSize() int {
+	if f.maxResponseSize <= 0 {
+		return DefaultMaxResponseSize
 	}
+	return f.maxResponseSize
+}
+
+// newTooLargeError builds the error for a response over the configured limit.
+func newTooLargeError(url string, maxSize int) *FetchError {
+	return &FetchError{
+		URL:     url,
+		Message: fmt.Sprintf("response exceeds maximum size (%d bytes)", maxSize),
+		Err:     ErrResponseTooLarge,
+	}
+}
+
+// newFetchError classifies an error returned by the transport.
+func newFetchError(url string, err error) *FetchError {
+	fe := &FetchError{URL: url, Message: err.Error()}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "deadline exceeded"):
+		fe.Err = fmt.Errorf("%w: %w", ErrTimeout, context.DeadlineExceeded)
+	case strings.Contains(lower, "timeout"), strings.Contains(lower, "abort"):
+		fe.Err = ErrTimeout
+	}
+	return fe
+}
+
+// newContextFetchError classifies a context cancellation.
+func newContextFetchError(url string, ctxErr error) *FetchError {
+	fe := &FetchError{URL: url, Message: ctxErr.Error(), Err: ctxErr}
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		fe.Err = fmt.Errorf("%w: %w", ErrTimeout, context.DeadlineExceeded)
+	}
+	return fe
 }
 
 // FetchError represents an HTTP fetch error with status information.
@@ -80,6 +143,9 @@ type FetchError struct {
 	URL        string
 	StatusCode int
 	Message    string
+	// Err is the underlying cause, if any. It identifies timeouts, oversized
+	// responses, and context cancellation.
+	Err error
 }
 
 func (e *FetchError) Error() string {
@@ -89,7 +155,39 @@ func (e *FetchError) Error() string {
 	return fmt.Sprintf("fetch %s: %s", e.URL, e.Message)
 }
 
+// Unwrap returns the underlying cause, enabling errors.Is and errors.As.
+func (e *FetchError) Unwrap() error {
+	return e.Err
+}
+
 // IsNotFound returns true if the error represents a 404 Not Found response.
 func (e *FetchError) IsNotFound() bool {
 	return e.StatusCode == 404
+}
+
+// IsTimeout reports whether the error came from a request timeout.
+func (e *FetchError) IsTimeout() bool {
+	return IsTimeout(e)
+}
+
+// IsTooLarge reports whether the error came from an oversized response.
+func (e *FetchError) IsTooLarge() bool {
+	return IsTooLarge(e)
+}
+
+// IsNotFound reports whether err (or an error it wraps) is a 404 response.
+func IsNotFound(err error) bool {
+	var fe *FetchError
+	return errors.As(err, &fe) && fe.StatusCode == 404
+}
+
+// IsTimeout reports whether err (or an error it wraps) is a timeout.
+func IsTimeout(err error) bool {
+	return errors.Is(err, ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// IsTooLarge reports whether err (or an error it wraps) exceeded the response
+// size limit.
+func IsTooLarge(err error) bool {
+	return errors.Is(err, ErrResponseTooLarge)
 }
