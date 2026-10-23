@@ -225,7 +225,7 @@ func (t *Tracer) TraceHTML(htmlPath string) (*ModuleGraph, error) {
 	if info, err := t.fs.Stat(htmlPath); err == nil && info.Size() > maxHTMLSize {
 		return nil, fmt.Errorf("HTML file %s exceeds maximum size (%d bytes)", htmlPath, maxHTMLSize)
 	}
-	content, err := t.fs.ReadFile(htmlPath)
+	content, err := t.readFile(htmlPath)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +345,7 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 		if info, err := t.fs.Stat(modulePath); err == nil && info.Size() > maxModuleSize {
 			return fmt.Errorf("module %s exceeds maximum size (%d bytes)", modulePath, maxModuleSize)
 		}
-		content, err := t.fs.ReadFile(modulePath)
+		content, err := t.readFile(modulePath)
 		if err != nil {
 			return err
 		}
@@ -543,19 +543,56 @@ func containsPath(root, p string) bool {
 // it and this check would not notice. Callers that need that guarantee must
 // supply a filesystem whose Stat already resolves links to the real path or
 // reject escaping links before tracing.
+// readFile reads path, preferring a confined read through fs.RootedFS when
+// the backend supports it and the path is under an allowed root. A rooted
+// read makes containment an OS guarantee instead of a check-then-read.
+func (t *Tracer) readFile(path string) ([]byte, error) {
+	if root, rel, ok := t.rootFor(path); ok {
+		if rooted, ok := t.fs.(fs.RootedFS); ok {
+			r, err := rooted.OpenRoot(root)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = r.Close() }()
+			return r.ReadFile(rel)
+		}
+	}
+	return t.fs.ReadFile(path)
+}
+
+// rootFor returns the longest allowed root containing path and the path
+// relative to it.
+func (t *Tracer) rootFor(path string) (root, rel string, ok bool) {
+	for _, candidate := range t.allowedRoots() {
+		if !containsPath(candidate, path) || len(candidate) <= len(root) {
+			continue
+		}
+		r, err := filepath.Rel(candidate, path)
+		if err != nil {
+			continue
+		}
+		root, rel, ok = candidate, r, true
+	}
+	return root, rel, ok
+}
+
+// allowedRoots returns the directories the tracer may read from.
+func (t *Tracer) allowedRoots() []string {
+	roots := make([]string, 0, len(t.allowedPaths)+2)
+	roots = append(roots, t.rootDir)
+	if t.nodeModulesPath != "" {
+		roots = append(roots, t.nodeModulesPath)
+	}
+	return append(roots, t.allowedPaths...)
+}
+
 // allowPath reports whether p is inside the tracer's allowed roots. When the
 // FileSystem implements fs.SymlinkResolver, both p and the roots are resolved
 // first so a link cannot escape. Resolution happens before the read; a path
 // swapped for a symlink after this check is still subject to that race.
 func (t *Tracer) allowPath(p string) bool {
 	resolved := resolveSymlinks(t.fs, p)
-	roots := make([]string, 0, len(t.allowedPaths)+2)
-	roots = append(roots, t.rootDir)
-	if t.nodeModulesPath != "" {
-		roots = append(roots, t.nodeModulesPath)
-	}
-	roots = append(roots, t.allowedPaths...)
-	for _, root := range roots {
+	for _, root := range t.allowedRoots() {
 		if containsPath(resolveSymlinks(t.fs, root), resolved) {
 			return true
 		}

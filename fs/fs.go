@@ -54,10 +54,28 @@ type SymlinkResolver interface {
 	EvalSymlinks(path string) (string, error)
 }
 
+// RootedFS is an optional capability for file systems that can confine
+// operations to a directory tree. Callers should prefer it for reads of
+// untrusted content so containment is enforced by the OS rather than by a
+// check followed by a read.
+type RootedFS interface {
+	OpenRoot(name string) (*os.Root, error)
+}
+
+// AtomicWriter is an optional capability for file systems that can replace a
+// file without exposing a truncated intermediate state.
+type AtomicWriter interface {
+	WriteFileAtomic(name string, data []byte, perm fs.FileMode) error
+}
+
 // OSFileSystem implements FileSystem using the standard os package.
 type OSFileSystem struct{}
 
-var _ SymlinkResolver = (*OSFileSystem)(nil)
+var (
+	_ SymlinkResolver = (*OSFileSystem)(nil)
+	_ RootedFS        = (*OSFileSystem)(nil)
+	_ AtomicWriter    = (*OSFileSystem)(nil)
+)
 
 // NewOSFileSystem creates a new filesystem that uses the standard os package.
 func NewOSFileSystem() *OSFileSystem {
@@ -113,4 +131,43 @@ func (f *OSFileSystem) Open(name string) (fs.File, error) {
 // EvalSymlinks returns the path name after evaluating any symbolic links.
 func (f *OSFileSystem) EvalSymlinks(path string) (string, error) {
 	return filepath.EvalSymlinks(path)
+}
+
+// OpenRoot opens name as a directory tree that confines subsequent operations.
+func (f *OSFileSystem) OpenRoot(name string) (*os.Root, error) {
+	return os.OpenRoot(name)
+}
+
+// WriteFileAtomic writes data to a temporary file in the same directory and
+// renames it over name, so readers never observe a partial file.
+func (f *OSFileSystem) WriteFileAtomic(name string, data []byte, perm fs.FileMode) error {
+	dir := filepath.Dir(name)
+	tmp, err := os.CreateTemp(dir, ".mappa-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, name); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }

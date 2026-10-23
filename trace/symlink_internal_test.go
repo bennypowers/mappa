@@ -63,6 +63,38 @@ func TestAllowPathRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestReadFileRejectsEscapeThroughRootedFS(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	modules := filepath.Join(root, "node_modules")
+	if err := os.MkdirAll(modules, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outside, "secret.js")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(modules, "escape.js")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(modules, "ok.js")
+	if err := os.WriteFile(inside, []byte("export {};"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tracer := NewTracer(fs.NewOSFileSystem(), root).WithNodeModules(modules)
+	if _, err := tracer.readFile(link); err == nil {
+		t.Fatal("rooted read followed a symlink outside its root")
+	}
+	if _, err := tracer.readFile(inside); err != nil {
+		t.Fatalf("rooted read of an in-root file failed: %v", err)
+	}
+}
+
 func TestAllowPathFallsBackWhenSymlinksUnsupported(t *testing.T) {
 	// A FileSystem without SymlinkResolver keeps lexical containment.
 	tracer := NewTracer(nil, "/ws/packages/app").WithNodeModules("/ws/node_modules")

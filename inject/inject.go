@@ -213,7 +213,13 @@ func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoo
 
 	// Write file if not dry-run
 	if !opts.DryRun {
-		if err := osfs.WriteFile(htmlFile, newContent, 0644); err != nil {
+		var err error
+		if atomic, ok := osfs.(fs.AtomicWriter); ok {
+			err = atomic.WriteFileAtomic(htmlFile, newContent, 0644)
+		} else {
+			err = osfs.WriteFile(htmlFile, newContent, 0644)
+		}
+		if err != nil {
 			result.Error = err.Error()
 			return result
 		}
