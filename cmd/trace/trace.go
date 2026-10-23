@@ -21,8 +21,8 @@ package trace
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -161,15 +161,10 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 		}
 
 		// Print warnings to stderr
-		for _, issue := range issues {
-			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
-			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
-		}
-		for _, graphErr := range result.Errors {
-			fmt.Fprintf(os.Stderr, "Warning: %v\n", graphErr)
-		}
-		if fatal, _ := trace.ClassifyGraphErrors(result.Errors); len(fatal) > 0 {
-			return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
+		output.PrintIssues(os.Stderr, issues)
+		output.PrintGraphErrors(os.Stderr, result.Errors)
+		if err := output.FatalGraphError(result.Errors); err != nil {
+			return err
 		}
 
 		out, err := json.MarshalIndent(result, "", "  ")
@@ -189,18 +184,13 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 	}
 
 	// Print warnings to stderr
-	for _, issue := range result.Issues {
-		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
-		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
-	}
-	for _, graphErr := range result.Errors {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", graphErr)
-	}
+	output.PrintIssues(os.Stderr, result.Issues)
+	output.PrintGraphErrors(os.Stderr, result.Errors)
 
 	// Read/parse failures make the import map incomplete. Report them as
 	// failures instead of emitting a partial map with a success exit code.
-	if fatal, _ := trace.ClassifyGraphErrors(result.Errors); len(fatal) > 0 {
-		return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
+	if err := output.FatalGraphError(result.Errors); err != nil {
+		return err
 	}
 
 	return output.ImportMap(osfs, result.ImportMap, format)
@@ -222,41 +212,39 @@ func runBatch(osfs fs.FileSystem, files []string, absRoot, format string, opts t
 	}
 	sort.Slice(collected, func(i, j int) bool { return collected[i].File < collected[j].File })
 
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
 	var errorCount int
-	for _, result := range collected {
-		if result.Error != "" {
-			errorCount++
+	// Encode directly to stdout; the collected slice is already sorted, so
+	// determinism does not require a second full copy of the output.
+	encodeAll := func(w io.Writer) error {
+		encoder := json.NewEncoder(w)
+		for _, result := range collected {
+			if result.Error != "" {
+				errorCount++
+			}
+			// Clear warnings from JSON output (they go to stderr)
+			result.Warnings = nil
+			if err := encoder.Encode(result); err != nil {
+				return fmt.Errorf("encoding result for %s: %w", result.File, err)
+			}
 		}
-		// Clear warnings from JSON output (they go to stderr)
-		result.Warnings = nil
-		if err := encoder.Encode(result); err != nil {
-			return fmt.Errorf("encoding result for %s: %w", result.File, err)
-		}
+		return nil
 	}
 
 	if outputPath := viper.GetString("output"); outputPath != "" {
+		var buf bytes.Buffer
+		if err := encodeAll(&buf); err != nil {
+			return err
+		}
 		if err := osfs.WriteFile(outputPath, buf.Bytes(), 0644); err != nil {
 			return fmt.Errorf("writing output: %w", err)
 		}
-	} else {
-		if _, err := os.Stdout.Write(buf.Bytes()); err != nil {
-			return err
-		}
+	} else if err := encodeAll(os.Stdout); err != nil {
+		return err
 	}
 
 	// Output warnings and non-fatal graph errors serially to stderr in the
 	// same sorted order as stdout.
-	for _, result := range collected {
-		for _, w := range result.Warnings {
-			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
-			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
-		}
-		for _, graphErr := range result.GraphErrors {
-			fmt.Fprintf(os.Stderr, "Warning: %s: %s\n", result.File, graphErr)
-		}
-	}
+	output.PrintBatchWarnings(os.Stderr, collected)
 
 	if errorCount > 0 {
 		return fmt.Errorf("%d of %d files failed to trace", errorCount, len(collected))
