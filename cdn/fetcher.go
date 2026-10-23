@@ -29,8 +29,10 @@ import (
 // Real registry packuments (for example vite) exceed 32 MiB, so the default
 // must be large enough to admit them.
 //
-// The check runs after the fetch implementation has buffered the body, so this
-// is a validation limit, not a transfer or memory bound.
+// Native builds stream the body and stop reading once the limit is exceeded,
+// so the cap bounds transfer and memory. WASM builds receive a fully buffered
+// body from tinywasm/fetch and validate the cap after transfer, so there it
+// guards downstream parsing but not the transfer itself.
 const DefaultMaxResponseSize = 64 << 20
 
 // Sentinel errors exposed by FetchError so callers can classify failures
@@ -81,10 +83,12 @@ func (f *HTTPFetcher) WithMaxResponseSize(n int) *HTTPFetcher {
 }
 
 // Fetch retrieves content from the given URL.
-// Note: cancellation without a deadline stops waiting for the response but does
-// not abort the underlying HTTP request due to the async callback pattern.
-// A context deadline, however, is forwarded to the request as its timeout and
-// does abort it.
+// Native builds enforce the size limit while streaming and abort the request
+// on context cancellation or deadline.
+// WASM builds check the limit only after the body has been buffered, and
+// cancellation without a deadline stops waiting for the response without
+// aborting the underlying request; a context deadline is forwarded to the
+// request as its timeout and does abort it.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
 	return f.fetch(ctx, url, nil)
 }

@@ -200,6 +200,12 @@ func TestMatchCaretRange(t *testing.T) {
 			"0.0",
 			"0.0.2",
 		},
+		{
+			"zero major only",
+			[]string{"0.0.1", "0.1.0", "0.2.3", "1.0.0"},
+			"0",
+			"0.2.3",
+		},
 	}
 
 	for _, tt := range tests {
@@ -400,6 +406,74 @@ func TestResolveVersionRetriesPackumentAfterFailure(t *testing.T) {
 	}
 	if got != "2.1.0" {
 		t.Errorf("got %q, want 2.1.0", got)
+	}
+}
+
+// contextBoundFetcher blocks the first request until its context is canceled,
+// then answers subsequent requests from base.
+type contextBoundFetcher struct {
+	base     Fetcher
+	started  chan struct{}
+	once     sync.Once
+	fetchCnt atomic.Int32
+}
+
+func (f *contextBoundFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	if f.fetchCnt.Add(1) == 1 {
+		f.once.Do(func() { close(f.started) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return f.base.Fetch(ctx, url)
+}
+
+func TestResolveVersionRetriesCoalescedFetchAfterLeaderCancel(t *testing.T) {
+	litRegistry := testutil.LoadFixtureFile(t, "lit_registry.json")
+	mock := NewMockFetcher()
+	mock.AddResponse("https://registry.npmjs.org/lit", litRegistry)
+
+	fetcher := &contextBoundFetcher{base: mock, started: make(chan struct{})}
+	registry := NewRegistry(fetcher)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := registry.ResolveVersion(leaderCtx, "lit", "^2.0.0")
+		leaderDone <- err
+	}()
+
+	<-fetcher.started
+
+	// Join the in-flight fetch as a second caller with a live context.
+	waiterDone := make(chan struct {
+		version string
+		err     error
+	}, 1)
+	go func() {
+		version, err := registry.ResolveVersion(context.Background(), "lit", "^2.0.0")
+		waiterDone <- struct {
+			version string
+			err     error
+		}{version, err}
+	}()
+
+	// Give the waiter time to attach to the in-flight call before the leader
+	// is canceled.
+	time.Sleep(50 * time.Millisecond)
+	cancelLeader()
+
+	if err := <-leaderDone; err == nil {
+		t.Error("expected the canceled leader to fail")
+	}
+
+	got := <-waiterDone
+	if got.err != nil {
+		t.Fatalf("expected the waiter to retry with its own context, got %v", got.err)
+	}
+	if got.version != "2.1.0" {
+		t.Errorf("got version %q, want 2.1.0", got.version)
 	}
 }
 

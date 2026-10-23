@@ -27,6 +27,7 @@ import (
 	"time"
 
 	mappacdn "bennypowers.dev/mappa/cdn"
+	"bennypowers.dev/mappa/importmap"
 	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/testutil"
 )
@@ -581,6 +582,54 @@ func TestWithConcurrencyIgnoresZero(t *testing.T) {
 	resolver := New(mockFetcher).WithConcurrency(0)
 	if resolver.concurrency != 10 {
 		t.Errorf("Expected concurrency to remain 10 for zero input, got %d", resolver.concurrency)
+	}
+}
+
+func TestShallowTaskTraversesAfterDepthTruncatedTask(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	mockFetcher.AddResponse("https://registry.npmjs.org/deep-a",
+		testutil.LoadFixtureFile(t, "deep-a-registry/response.json"))
+	mockFetcher.AddResponse("https://esm.sh/deep-a@1.0.0/package.json",
+		testutil.LoadFixtureFile(t, "deep-a-package/package.json"))
+	mockFetcher.AddResponse("https://registry.npmjs.org/subdep-a1",
+		testutil.LoadFixtureFile(t, "subdep-a1-registry/response.json"))
+	mockFetcher.AddResponse("https://esm.sh/subdep-a1@1.0.0/package.json",
+		testutil.LoadFixtureFile(t, "subdep-a1-package/package.json"))
+
+	resolver := New(mockFetcher).WithMaxDepth(1)
+	im := &importmap.ImportMap{
+		Imports: make(map[string]string),
+		Scopes:  make(map[string]map[string]string),
+	}
+	state := newResolveState(context.Background(), resolver, im)
+
+	// A task at the depth limit cannot traverse, so it must not consume the
+	// package's visit.
+	state.process(&resolveTask{
+		name:         "deep-a",
+		versionRange: "^1.0.0",
+		depth:        1,
+		parentScope:  "https://esm.sh/parent@1.0.0/",
+	})
+	// A later, shallower task for the same package must still traverse.
+	state.process(&resolveTask{name: "deep-a", versionRange: "^1.0.0"})
+
+	// Drain the tasks enqueued by the shallow traversal.
+	for {
+		state.queue.mu.Lock()
+		if state.queue.head >= len(state.queue.items) {
+			state.queue.mu.Unlock()
+			break
+		}
+		task := state.queue.items[state.queue.head]
+		state.queue.head++
+		state.queue.mu.Unlock()
+		state.process(task)
+	}
+
+	scope := im.Scopes["https://esm.sh/deep-a@1.0.0/"]
+	if scope["subdep-a1"] != "https://esm.sh/subdep-a1@1.0.0/index.js" {
+		t.Errorf("expected subdep-a1 in deep-a scope after shallow traversal, got %v", im.Scopes)
 	}
 }
 

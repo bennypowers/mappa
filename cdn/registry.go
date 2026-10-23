@@ -20,6 +20,7 @@ package cdn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -156,6 +157,12 @@ func (r *Registry) fetchPackument(ctx context.Context, pkgName string) (*Registr
 		r.inflightMu.Unlock()
 		select {
 		case <-call.done:
+			// The leader's context may have died while ours is still live. The
+			// failure belongs to the leader's request, not to this caller, so
+			// retry under our own context instead of propagating it.
+			if ctx.Err() == nil && isContextError(call.err) {
+				return r.fetchPackument(ctx, pkgName)
+			}
 			return call.pkg, call.err
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -194,6 +201,12 @@ func (r *Registry) doFetchPackument(ctx context.Context, pkgName string) (*Regis
 		return nil, fmt.Errorf("failed to parse package metadata for %s: %w", pkgName, err)
 	}
 	return &pkg, nil
+}
+
+// isContextError reports whether err was caused by a canceled or expired
+// context rather than by the remote server.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // fetchWithAccept sends a media type hint when the fetcher supports headers.
@@ -522,23 +535,30 @@ func matchCaretRange(versions []string, baseVersion string) string {
 			continue
 		}
 
-		// ^0.0.x - only matches that exact patch (the left-most non-zero
-		// component may not change). ^0.0 (no patch) matches any 0.0.z.
-		if base.Major == 0 && base.Minor == 0 {
-			if strings.Count(baseVersion, ".") >= 2 {
-				if sv.Major == 0 && sv.Minor == 0 && sv.Patch == base.Patch {
+		// ^0 matches every 0.x.y: only the left-most non-zero component (the
+		// major) may not change. ^0.0 / ^0.x allow any patch on the same
+		// minor, while ^0.0.p pins the patch because the left-most non-zero
+		// component is then the patch itself.
+		if base.Major == 0 {
+			switch strings.Count(strings.TrimSpace(baseVersion), ".") {
+			case 0:
+				if sv.Major == 0 {
 					matches = append(matches, v)
 				}
-			} else if sv.Major == 0 && sv.Minor == 0 {
-				matches = append(matches, v)
-			}
-			continue
-		}
-
-		// ^0.x.y - allows 0.x.z where z >= y (same minor, patch can increase)
-		if base.Major == 0 {
-			if sv.Major == 0 && sv.Minor == base.Minor && sv.Patch >= base.Patch {
-				matches = append(matches, v)
+			case 1:
+				if sv.Major == 0 && sv.Minor == base.Minor {
+					matches = append(matches, v)
+				}
+			default:
+				if sv.Major == 0 && sv.Minor == base.Minor {
+					if base.Minor == 0 {
+						if sv.Patch == base.Patch {
+							matches = append(matches, v)
+						}
+					} else if sv.Patch >= base.Patch {
+						matches = append(matches, v)
+					}
+				}
 			}
 			continue
 		}

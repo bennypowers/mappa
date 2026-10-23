@@ -351,10 +351,6 @@ func (s *resolveState) process(task *resolveTask) {
 		return
 	}
 
-	// Only mark the package visited after a successful fetch.
-	cacheKey := task.name + "@" + version
-	_, alreadyVisited := s.visited.LoadOrStore(cacheKey, true)
-
 	if task.depth == 0 {
 		// Depth 0 always adds the declared dependency's top-level imports,
 		// even if a transitive scope already visited the same version.
@@ -373,15 +369,20 @@ func (s *resolveState) process(task *resolveTask) {
 	}
 
 	// A package's own dependencies only need enqueueing once per resolved
-	// version; every parent still gets its scope entries above.
-	if alreadyVisited {
-		return
+	// version, and only by a task that may actually traverse them. A task at
+	// the depth limit still contributes imports and scope entries above, but
+	// must not consume the visit: a later, shallower task may still need to
+	// traverse this version.
+	canTraverse := r.resolveScope && len(pkg.Dependencies) > 0 &&
+		(r.maxDepth == 0 || task.depth < r.maxDepth)
+	cacheKey := task.name + "@" + version
+	if canTraverse {
+		if _, alreadyVisited := s.visited.LoadOrStore(cacheKey, true); alreadyVisited {
+			return
+		}
 	}
 
-	if !r.resolveScope || len(pkg.Dependencies) == 0 {
-		return
-	}
-	if r.maxDepth > 0 && task.depth >= r.maxDepth {
+	if !canTraverse {
 		return
 	}
 	if len(pkg.Dependencies) > maxDependencyEntries {

@@ -93,7 +93,10 @@ func doGenerate(args []js.Value) (string, error) {
 		return "", &jsError{message: "failed to parse package.json: " + err.Error()}
 	}
 
-	opts := parseGenerateOptions(args)
+	opts, err := parseGenerateOptions(args)
+	if err != nil {
+		return "", err
+	}
 
 	fetcher := cdn.NewHTTPFetcher()
 	resolver, err := opts.Apply(cdnresolver.New(fetcher))
@@ -182,10 +185,10 @@ func doResolve(args []js.Value) (string, error) {
 	return string(jsonBytes), nil
 }
 
-func parseGenerateOptions(args []js.Value) options.Generate {
+func parseGenerateOptions(args []js.Value) (options.Generate, error) {
 	opts := options.Generate{}
 	if len(args) < 2 || args[1].IsUndefined() || args[1].IsNull() {
-		return opts
+		return opts, nil
 	}
 
 	obj := args[1]
@@ -203,14 +206,23 @@ func parseGenerateOptions(args []js.Value) options.Generate {
 		opts.Exclude = jsStringArray(v)
 	}
 	if v := obj.Get("timeoutMs"); !v.IsUndefined() && !v.IsNull() {
+		if v.Type() != js.TypeNumber {
+			return opts, &jsError{message: "timeoutMs must be a number"}
+		}
 		ms := v.Int()
+		if ms < 0 {
+			return opts, &jsError{message: "timeoutMs must not be negative"}
+		}
 		opts.TimeoutMs = &ms
 	}
 	if v := obj.Get("allowPartial"); !v.IsUndefined() && !v.IsNull() {
+		if v.Type() != js.TypeBoolean {
+			return opts, &jsError{message: "allowPartial must be a boolean"}
+		}
 		opts.AllowPartial = v.Bool()
 	}
 
-	return opts
+	return opts, nil
 }
 
 // newJSError builds a JS Error with a stable code for classified failures.
