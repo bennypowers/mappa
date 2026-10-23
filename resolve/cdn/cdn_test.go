@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	mappacdn "bennypowers.dev/mappa/cdn"
 	"bennypowers.dev/mappa/importmap"
 	"bennypowers.dev/mappa/packagejson"
+	"bennypowers.dev/mappa/resolve"
 	"bennypowers.dev/mappa/testutil"
 )
 
@@ -615,17 +617,7 @@ func TestShallowTaskTraversesAfterDepthTruncatedTask(t *testing.T) {
 	state.process(&resolveTask{name: "deep-a", versionRange: "^1.0.0"})
 
 	// Drain the tasks enqueued by the shallow traversal.
-	for {
-		state.queue.mu.Lock()
-		if state.queue.head >= len(state.queue.items) {
-			state.queue.mu.Unlock()
-			break
-		}
-		task := state.queue.items[state.queue.head]
-		state.queue.head++
-		state.queue.mu.Unlock()
-		state.process(task)
-	}
+	state.drain()
 
 	scope := im.Scopes["https://esm.sh/deep-a@1.0.0/"]
 	if scope["subdep-a1"] != "https://esm.sh/subdep-a1@1.0.0/index.js" {
@@ -913,8 +905,8 @@ func TestAllowPartialReturnsWarnings(t *testing.T) {
 }
 
 func TestMaxDependencyEntriesRoot(t *testing.T) {
-	deps := make(map[string]string, maxDependencyEntries+1)
-	for i := range maxDependencyEntries + 1 {
+	deps := make(map[string]string, resolve.MaxDependencyEntries+1)
+	for i := range resolve.MaxDependencyEntries + 1 {
 		deps[fmt.Sprintf("dep-%d", i)] = "1.0.0"
 	}
 	pkg := &packagejson.PackageJSON{Dependencies: deps}
@@ -933,8 +925,8 @@ func TestMaxDependencyEntriesTransitive(t *testing.T) {
 	mockFetcher.AddResponse("https://registry.npmjs.org/huge-deps",
 		testutil.LoadFixtureFile(t, "huge-deps-registry/response.json"))
 
-	deps := make(map[string]string, maxDependencyEntries+1)
-	for i := range maxDependencyEntries + 1 {
+	deps := make(map[string]string, resolve.MaxDependencyEntries+1)
+	for i := range resolve.MaxDependencyEntries + 1 {
 		deps[fmt.Sprintf("dep-%d", i)] = "1.0.0"
 	}
 	manifest, err := json.Marshal(map[string]any{
@@ -1047,4 +1039,97 @@ func (f *flakyURLFetcher) Fetch(ctx context.Context, url string) ([]byte, error)
 		return nil, &mappacdn.FetchError{URL: url, StatusCode: 500, Message: "transient"}
 	}
 	return f.MockFetcher.Fetch(ctx, url)
+}
+
+// cancelFetcher blocks every request until the context is done.
+type cancelFetcher struct{}
+
+func (cancelFetcher) Fetch(ctx context.Context, _ string) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestCancellationStopsDrainingDeepQueue(t *testing.T) {
+	const deps = 500
+
+	dependencies := make(map[string]string, deps)
+	for i := range deps {
+		dependencies[fmt.Sprintf("dep-%d", i)] = "1.0.0"
+	}
+
+	resolver := New(cancelFetcher{}).WithConcurrency(4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := resolver.ResolvePackageJSON(ctx, &packagejson.PackageJSON{Dependencies: dependencies})
+		done <- err
+	}()
+
+	// Give the workers a moment to start their requests, then cancel.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected cancellation to be reported")
+		}
+		// One error per worker is the bound; draining the whole queue would
+		// produce one per queued dependency.
+		if got := strings.Count(err.Error(), "context canceled"); got > resolver.concurrency {
+			t.Errorf("recorded %d cancellation errors, want at most %d", got, resolver.concurrency)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ResolvePackageJSON did not return promptly after cancellation")
+	}
+}
+
+// urlCountingFetcher records how many times each URL was fetched.
+type urlCountingFetcher struct {
+	base mappacdn.Fetcher
+	mu   sync.Mutex
+	urls map[string]int
+}
+
+func (f *urlCountingFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	f.mu.Lock()
+	f.urls[url]++
+	f.mu.Unlock()
+	return f.base.Fetch(ctx, url)
+}
+
+func (f *urlCountingFetcher) count(url string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.urls[url]
+}
+
+func TestSharedManifestFetchedOncePastCacheSize(t *testing.T) {
+	const parents = 150 // more than the 100-entry PackageCache
+
+	mockFetcher := NewMockFetcher()
+	deps := make(map[string]string, parents)
+	for i := range parents {
+		name := fmt.Sprintf("parent-%d", i)
+		deps[name] = "1.0.0"
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json",
+			[]byte(fmt.Sprintf(`{"name":%q,"version":"1.0.0","exports":"./index.js","dependencies":{"shared":"1.0.0"}}`, name)))
+	}
+	mockFetcher.AddResponse("https://esm.sh/shared@1.0.0/package.json",
+		[]byte(`{"name":"shared","version":"1.0.0","exports":"./index.js"}`))
+
+	fetcher := &urlCountingFetcher{base: mockFetcher, urls: make(map[string]int)}
+	im, err := New(fetcher).ResolvePackageJSON(context.Background(),
+		&packagejson.PackageJSON{Dependencies: deps})
+	if err != nil {
+		t.Fatalf("ResolvePackageJSON error: %v", err)
+	}
+
+	if len(im.Imports) != parents {
+		t.Errorf("resolved %d imports, want %d", len(im.Imports), parents)
+	}
+	if got := fetcher.count("https://esm.sh/shared@1.0.0/package.json"); got != 1 {
+		t.Errorf("shared manifest fetched %d times, want 1", got)
+	}
 }
