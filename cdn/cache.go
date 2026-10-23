@@ -26,10 +26,7 @@ import (
 // PackageCache provides a thread-safe cache for fetched package.json data.
 // This cache stores parsed PackageJSON objects keyed by package@version.
 type PackageCache struct {
-	mu      sync.RWMutex
-	entries map[string]*cacheEntry
-	order   []string // LRU order tracking
-	maxSize int
+	lru *lru[*cacheEntry]
 }
 
 type cacheEntry struct {
@@ -51,14 +48,7 @@ func (e *cacheEntry) load() {
 // NewPackageCache creates a new package cache with the specified maximum size.
 // When the cache exceeds this size, the oldest entries are evicted.
 func NewPackageCache(maxSize int) *PackageCache {
-	if maxSize <= 0 {
-		maxSize = 100
-	}
-	return &PackageCache{
-		entries: make(map[string]*cacheEntry),
-		order:   make([]string, 0, maxSize),
-		maxSize: maxSize,
-	}
+	return &PackageCache{lru: newLRU[*cacheEntry](maxSize)}
 }
 
 // cacheKey generates a cache key for a package at a specific version.
@@ -67,13 +57,15 @@ func cacheKey(pkgName, version string) string {
 }
 
 // Get retrieves a cached package.json by package name and version.
-// Returns nil, false if not in cache.
+// Returns nil, false if not in cache. If another goroutine is still loading
+// the entry, Get waits for that load to finish.
 func (c *PackageCache) Get(pkgName, version string) (*packagejson.PackageJSON, bool) {
-	key := cacheKey(pkgName, version)
-	c.mu.RLock()
-	entry, ok := c.entries[key]
-	c.mu.RUnlock()
-	if !ok || entry.err != nil {
+	entry, ok := c.lru.get(cacheKey(pkgName, version))
+	if !ok {
+		return nil, false
+	}
+	entry.load()
+	if entry.err != nil || entry.pkg == nil {
 		return nil, false
 	}
 	return entry.pkg, true
@@ -81,117 +73,45 @@ func (c *PackageCache) Get(pkgName, version string) (*packagejson.PackageJSON, b
 
 // Set stores a package.json in the cache.
 func (c *PackageCache) Set(pkgName, version string, pkg *packagejson.PackageJSON) {
-	key := cacheKey(pkgName, version)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Check if already exists - update entry and refresh LRU order
-	if _, exists := c.entries[key]; exists {
-		c.entries[key] = &cacheEntry{pkg: pkg}
-		// Move key to end of order slice (most recently used)
-		for i, k := range c.order {
-			if k == key {
-				c.order = append(c.order[:i], c.order[i+1:]...)
-				break
-			}
-		}
-		c.order = append(c.order, key)
-		return
-	}
-
-	// Evict oldest if at capacity
-	if len(c.entries) == c.maxSize {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		delete(c.entries, oldest)
-	}
-
-	c.entries[key] = &cacheEntry{pkg: pkg}
-	c.order = append(c.order, key)
+	c.lru.set(cacheKey(pkgName, version), &cacheEntry{pkg: pkg})
 }
 
 // GetOrLoad retrieves a cached package.json or loads it using the provided loader.
-// The loader is called at most once per cache key, even with concurrent access.
+// The loader runs at most once per successful load, even with concurrent access.
+// Failed loads are evicted from the cache, so a subsequent call retries.
 func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packagejson.PackageJSON, error)) (*packagejson.PackageJSON, error) {
 	key := cacheKey(pkgName, version)
 
-	// Fast path: check if already cached
-	c.mu.RLock()
-	entry, ok := c.entries[key]
-	c.mu.RUnlock()
-
-	if ok {
+	if entry, ok := c.lru.get(key); ok {
 		entry.load()
 		return entry.pkg, entry.err
 	}
 
-	// Slow path: create entry and load
-	c.mu.Lock()
-	// Double-check after acquiring write lock
-	entry, ok = c.entries[key]
-	if ok {
-		c.mu.Unlock()
-		entry.load()
-		return entry.pkg, entry.err
+	entry := &cacheEntry{loader: loader}
+	existing, exists := c.lru.getOrInsert(key, entry)
+	if exists {
+		existing.load()
+		return existing.pkg, existing.err
 	}
-
-	// Evict oldest if at capacity
-	if len(c.entries) == c.maxSize {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		delete(c.entries, oldest)
-	}
-
-	// Create new entry with loader
-	entry = &cacheEntry{loader: loader}
-	c.entries[key] = entry
-	c.order = append(c.order, key)
-	c.mu.Unlock()
 
 	entry.load()
 	if entry.err != nil {
-		c.mu.Lock()
-		if current, ok := c.entries[key]; ok && current == entry {
-			delete(c.entries, key)
-			for i, k := range c.order {
-				if k == key {
-					c.order = append(c.order[:i], c.order[i+1:]...)
-					break
-				}
-			}
-		}
-		c.mu.Unlock()
+		c.lru.deleteIf(key, func(current *cacheEntry) bool { return current == entry })
 	}
 	return entry.pkg, entry.err
 }
 
 // Invalidate removes a specific package from the cache.
 func (c *PackageCache) Invalidate(pkgName, version string) {
-	key := cacheKey(pkgName, version)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	delete(c.entries, key)
-	// Remove from order slice
-	for i, k := range c.order {
-		if k == key {
-			c.order = append(c.order[:i], c.order[i+1:]...)
-			break
-		}
-	}
+	c.lru.remove(cacheKey(pkgName, version))
 }
 
 // Clear removes all entries from the cache.
 func (c *PackageCache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries = make(map[string]*cacheEntry)
-	c.order = make([]string, 0, c.maxSize)
+	c.lru.clear()
 }
 
 // Size returns the current number of entries in the cache.
 func (c *PackageCache) Size() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.entries)
+	return c.lru.size()
 }

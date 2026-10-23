@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"bennypowers.dev/mappa/packagejson"
 )
@@ -166,6 +167,159 @@ func TestPackageCacheConcurrency(t *testing.T) {
 	}
 	if cache.Size() != 1 {
 		t.Errorf("Expected cache size 1, got %d", cache.Size())
+	}
+}
+
+func TestPackageCacheGetWaitsForInFlightLoad(t *testing.T) {
+	cache := NewPackageCache(10)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	want := &packagejson.PackageJSON{Name: "lit", Version: "3.0.0"}
+	loadDone := make(chan struct{})
+	go func() {
+		defer close(loadDone)
+		_, _ = cache.GetOrLoad("lit", "3.0.0", func() (*packagejson.PackageJSON, error) {
+			once.Do(func() { close(started) })
+			<-release
+			return want, nil
+		})
+	}()
+
+	<-started
+
+	type getResult struct {
+		pkg *packagejson.PackageJSON
+		ok  bool
+	}
+	got := make(chan getResult, 1)
+	go func() {
+		pkg, ok := cache.Get("lit", "3.0.0")
+		got <- getResult{pkg, ok}
+	}()
+
+	select {
+	case r := <-got:
+		t.Fatalf("Get returned before the in-flight load completed: %+v", r)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	close(release)
+	<-loadDone
+
+	select {
+	case r := <-got:
+		if !r.ok || r.pkg != want {
+			t.Fatalf("Get = (%v, %v), want (%v, true)", r.pkg, r.ok, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Get did not return after the load completed")
+	}
+}
+
+func TestPackageCacheGetNeverReturnsNilTrue(t *testing.T) {
+	cache := NewPackageCache(10)
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = cache.GetOrLoad("lit", "3.0.0", func() (*packagejson.PackageJSON, error) {
+			close(started)
+			<-release
+			return &packagejson.PackageJSON{Name: "lit"}, nil
+		})
+	}()
+	<-started
+
+	type getResult struct {
+		pkg *packagejson.PackageJSON
+		ok  bool
+	}
+	result := make(chan getResult, 1)
+	go func() {
+		pkg, ok := cache.Get("lit", "3.0.0")
+		result <- getResult{pkg, ok}
+	}()
+
+	// An in-flight entry must not surface as a hit before it has loaded.
+	select {
+	case got := <-result:
+		t.Fatalf("Get returned (nil, true)-style result while loading: %+v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	<-done
+	got := <-result
+	if !got.ok || got.pkg == nil {
+		t.Fatalf("Get = (%v, %v) after load, want a non-nil hit", got.pkg, got.ok)
+	}
+}
+
+func TestPackageCacheCleanupDoesNotEvictReplacement(t *testing.T) {
+	cache := NewPackageCache(10)
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	failed := make(chan struct{})
+	go func() {
+		defer close(failed)
+		_, _ = cache.GetOrLoad("lit", "3.0.0", func() (*packagejson.PackageJSON, error) {
+			close(started)
+			<-release
+			return nil, errors.New("load failed")
+		})
+	}()
+
+	<-started
+	replacement := &packagejson.PackageJSON{Name: "lit", Version: "3.0.0"}
+	cache.Set("lit", "3.0.0", replacement)
+	close(release)
+	<-failed
+
+	got, ok := cache.Get("lit", "3.0.0")
+	if !ok {
+		t.Fatal("expected replacement entry to remain cached")
+	}
+	if got != replacement {
+		t.Errorf("got %+v, want the replacement entry", got)
+	}
+}
+
+func TestPackageCacheEvictionThenRefetch(t *testing.T) {
+	cache := NewPackageCache(2)
+	var loads sync.Map // key -> *atomic.Int32
+
+	load := func(name string) func() (*packagejson.PackageJSON, error) {
+		return func() (*packagejson.PackageJSON, error) {
+			v, _ := loads.LoadOrStore(name, &atomic.Int32{})
+			v.(*atomic.Int32).Add(1)
+			return &packagejson.PackageJSON{Name: name}, nil
+		}
+	}
+
+	for _, name := range []string{"a", "b"} {
+		if _, err := cache.GetOrLoad(name, "1.0.0", load(name)); err != nil {
+			t.Fatalf("GetOrLoad(%s) error: %v", name, err)
+		}
+	}
+	// Insert c, evicting a (oldest).
+	if _, err := cache.GetOrLoad("c", "1.0.0", load("c")); err != nil {
+		t.Fatalf("GetOrLoad(c) error: %v", err)
+	}
+	if _, ok := cache.Get("a", "1.0.0"); ok {
+		t.Fatal("expected a to be evicted")
+	}
+	// Refetching a must call the loader again.
+	if _, err := cache.GetOrLoad("a", "1.0.0", load("a")); err != nil {
+		t.Fatalf("GetOrLoad(a) after eviction error: %v", err)
+	}
+	v, _ := loads.Load("a")
+	if got := v.(*atomic.Int32).Load(); got != 2 {
+		t.Errorf("expected a to load twice, got %d", got)
 	}
 }
 

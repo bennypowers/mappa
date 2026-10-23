@@ -171,6 +171,10 @@ type ImportMap struct {
 	// Integrity maps module URLs to their expected subresource integrity values.
 	Integrity map[string]string `json:"integrity,omitempty"`
 
+	// Warnings records non-fatal resolution problems when a partial import map
+	// was explicitly requested.
+	Warnings []string `json:"warnings,omitempty"`
+
 	// nullImports and nullScopes track keys whose value was JSON null. The
 	// spec allows null to block a specifier, but map[string]string cannot
 	// represent it; these side tables preserve it across round-trips.
@@ -189,6 +193,7 @@ func (im *ImportMap) UnmarshalJSON(data []byte) error {
 		Imports   map[string]json.RawMessage            `json:"imports"`
 		Scopes    map[string]map[string]json.RawMessage `json:"scopes"`
 		Integrity map[string]string                     `json:"integrity"`
+		Warnings  []string                              `json:"warnings"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -199,6 +204,7 @@ func (im *ImportMap) UnmarshalJSON(data []byte) error {
 	im.Scopes = nil
 	im.nullScopes = nil
 	im.Integrity = raw.Integrity
+	im.Warnings = raw.Warnings
 
 	if raw.Imports != nil {
 		im.Imports = make(map[string]string, len(raw.Imports))
@@ -251,9 +257,10 @@ func (im *ImportMap) MarshalJSON() ([]byte, error) {
 		Imports   map[string]any            `json:"imports,omitempty"`
 		Scopes    map[string]map[string]any `json:"scopes,omitempty"`
 		Integrity map[string]string         `json:"integrity,omitempty"`
+		Warnings  []string                  `json:"warnings,omitempty"`
 	}
 
-	out := output{Integrity: im.Integrity}
+	out := output{Integrity: im.Integrity, Warnings: im.Warnings}
 
 	if im.Imports != nil || len(im.nullImports) > 0 {
 		out.Imports = make(map[string]any, len(im.Imports)+len(im.nullImports))

@@ -122,21 +122,22 @@ func Parse(data []byte) (*PackageJSON, error) {
 	return &pkg, nil
 }
 
-// maxPackageJSONSize caps manifest reads so an untrusted package.json cannot
+// MaxPackageJSONSize caps manifest reads so an untrusted package.json cannot
 // exhaust memory. Manifests larger than this are rejected rather than parsed.
-const maxPackageJSONSize = 10 << 20 // 10 MiB
+// Fetched manifests should be checked against this limit before parsing too.
+const MaxPackageJSONSize = 10 << 20 // 10 MiB
 
 // ParseFile parses a package.json file.
 func ParseFile(fs fs.FileSystem, path string) (*PackageJSON, error) {
-	if info, err := fs.Stat(path); err == nil && info.Size() > maxPackageJSONSize {
-		return nil, fmt.Errorf("package.json %s exceeds maximum size (%d bytes)", path, maxPackageJSONSize)
+	if info, err := fs.Stat(path); err == nil && info.Size() > MaxPackageJSONSize {
+		return nil, fmt.Errorf("package.json %s exceeds maximum size (%d bytes)", path, MaxPackageJSONSize)
 	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > maxPackageJSONSize {
-		return nil, fmt.Errorf("package.json %s exceeds maximum size (%d bytes)", path, maxPackageJSONSize)
+	if len(data) > MaxPackageJSONSize {
+		return nil, fmt.Errorf("package.json %s exceeds maximum size (%d bytes)", path, MaxPackageJSONSize)
 	}
 	return Parse(data)
 }

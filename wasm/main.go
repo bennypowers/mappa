@@ -23,6 +23,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"syscall/js"
 
 	"bennypowers.dev/mappa/cdn"
@@ -31,6 +32,7 @@ import (
 	"bennypowers.dev/mappa/packagejson"
 	cdnresolver "bennypowers.dev/mappa/resolve/cdn"
 	"bennypowers.dev/mappa/resolve/local"
+	"bennypowers.dev/mappa/wasm/options"
 )
 
 // Version is the mappa WASM version.
@@ -52,9 +54,12 @@ func main() {
 // Arguments:
 //   - packageJsonStr: string - The package.json contents as a JSON string
 //   - options: object (optional)
-//     - cdn: string - CDN provider name ("esm.sh", "unpkg", "jsdelivr")
-//     - template: string - Custom CDN template
-//     - conditions: string[] - Export conditions
+//   - cdn: string - CDN provider name ("esm.sh", "unpkg", "jsdelivr")
+//   - template: string - Custom CDN template
+//   - conditions: string[] - Export conditions
+//   - exclude: string[] - Packages to exclude (including transitively)
+//   - timeoutMs: number - Per-request timeout in milliseconds; 0 disables
+//   - allowPartial: boolean - Return a partial map with warnings instead of failing
 func generate(this js.Value, args []js.Value) any {
 	handler := js.FuncOf(func(this js.Value, promiseArgs []js.Value) any {
 		resolve := promiseArgs[0]
@@ -63,7 +68,7 @@ func generate(this js.Value, args []js.Value) any {
 		go func() {
 			result, err := doGenerate(args)
 			if err != nil {
-				reject.Invoke(js.Global().Get("Error").New(err.Error()))
+				reject.Invoke(newJSError(err))
 				return
 			}
 			resolve.Invoke(result)
@@ -91,32 +96,15 @@ func doGenerate(args []js.Value) (string, error) {
 	opts := parseGenerateOptions(args)
 
 	fetcher := cdn.NewHTTPFetcher()
-	resolver := cdnresolver.New(fetcher)
-
-	if opts.cdn != "" {
-		provider := cdn.ProviderByName(opts.cdn)
-		if provider != nil {
-			resolver = resolver.WithProvider(*provider)
-		}
-	}
-	if opts.template != "" {
-		var err error
-		resolver, err = resolver.WithTemplate(opts.template)
-		if err != nil {
-			return "", &jsError{message: "invalid template: " + err.Error()}
-		}
-	}
-	if len(opts.conditions) > 0 {
-		resolver = resolver.WithConditions(opts.conditions)
-	}
-	if len(opts.exclude) > 0 {
-		resolver = resolver.WithExclude(opts.exclude)
+	resolver, err := opts.Apply(cdnresolver.New(fetcher))
+	if err != nil {
+		return "", &jsError{message: "invalid template: " + err.Error()}
 	}
 
 	ctx := context.Background()
 	im, err := resolver.ResolvePackageJSON(ctx, pkg)
 	if err != nil {
-		return "", &jsError{message: "failed to generate import map: " + err.Error()}
+		return "", &jsError{message: "failed to generate import map: " + err.Error(), err: err}
 	}
 
 	jsonBytes, err := json.MarshalIndent(im, "", "  ")
@@ -132,12 +120,12 @@ func doGenerate(args []js.Value) (string, error) {
 // Arguments:
 //   - rootDir: string - Path to directory containing package.json and node_modules
 //   - options: object (optional)
-//     - template: string - URL template (default: /node_modules/{package}/{path})
-//     - conditions: string[] - Export condition priority
-//     - includePackages: string[] - Additional packages beyond dependencies
-//     - exclude: string[] - Packages to exclude
-//     - inputMap: string - Import map JSON to merge (input map takes precedence)
-//     - optimize: number - 0=none, 1=simplify+dedup (default: 1)
+//   - template: string - URL template (default: /node_modules/{package}/{path})
+//   - conditions: string[] - Export condition priority
+//   - includePackages: string[] - Additional packages beyond dependencies
+//   - exclude: string[] - Packages to exclude
+//   - inputMap: string - Import map JSON to merge (input map takes precedence)
+//   - optimize: number - 0=none, 1=simplify+dedup (default: 1)
 func resolveLocal(this js.Value, args []js.Value) any {
 	handler := js.FuncOf(func(this js.Value, promiseArgs []js.Value) any {
 		resolve := promiseArgs[0]
@@ -194,15 +182,8 @@ func doResolve(args []js.Value) (string, error) {
 	return string(jsonBytes), nil
 }
 
-type generateOptions struct {
-	cdn        string
-	template   string
-	conditions []string
-	exclude    []string
-}
-
-func parseGenerateOptions(args []js.Value) generateOptions {
-	opts := generateOptions{}
+func parseGenerateOptions(args []js.Value) options.Generate {
+	opts := options.Generate{}
 	if len(args) < 2 || args[1].IsUndefined() || args[1].IsNull() {
 		return opts
 	}
@@ -210,19 +191,42 @@ func parseGenerateOptions(args []js.Value) generateOptions {
 	obj := args[1]
 
 	if v := obj.Get("cdn"); !v.IsUndefined() && !v.IsNull() {
-		opts.cdn = v.String()
+		opts.CDN = v.String()
 	}
 	if v := obj.Get("template"); !v.IsUndefined() && !v.IsNull() {
-		opts.template = v.String()
+		opts.Template = v.String()
 	}
 	if v := obj.Get("conditions"); !v.IsUndefined() && !v.IsNull() {
-		opts.conditions = jsStringArray(v)
+		opts.Conditions = jsStringArray(v)
 	}
 	if v := obj.Get("exclude"); !v.IsUndefined() && !v.IsNull() {
-		opts.exclude = jsStringArray(v)
+		opts.Exclude = jsStringArray(v)
+	}
+	if v := obj.Get("timeoutMs"); !v.IsUndefined() && !v.IsNull() {
+		ms := v.Int()
+		opts.TimeoutMs = &ms
+	}
+	if v := obj.Get("allowPartial"); !v.IsUndefined() && !v.IsNull() {
+		opts.AllowPartial = v.Bool()
 	}
 
 	return opts
+}
+
+// newJSError builds a JS Error with a stable code for classified failures.
+func newJSError(err error) js.Value {
+	jsErr := js.Global().Get("Error").New(err.Error())
+	switch {
+	case cdn.IsTooLarge(err):
+		jsErr.Set("code", "ERR_RESPONSE_TOO_LARGE")
+	case cdn.IsTimeout(err):
+		jsErr.Set("code", "ERR_TIMEOUT")
+	case cdn.IsNotFound(err):
+		jsErr.Set("code", "ERR_NOT_FOUND")
+	case errors.Is(err, context.DeadlineExceeded):
+		jsErr.Set("code", "ERR_TIMEOUT")
+	}
+	return jsErr
 }
 
 type resolveOptions struct {
@@ -232,7 +236,7 @@ type resolveOptions struct {
 	exclude         []string
 	inputMap        *importmap.ImportMap
 	optimize        int
-	pathBase         string
+	pathBase        string
 	packageDeps     string
 }
 
@@ -243,7 +247,7 @@ func (o *resolveOptions) localOptions() *local.Options {
 		IncludePackages: o.includePackages,
 		Exclude:         o.exclude,
 		InputMap:        o.inputMap,
-		PathBase:         o.pathBase,
+		PathBase:        o.pathBase,
 		PackageDeps:     o.packageDeps,
 	}
 }
@@ -300,8 +304,14 @@ func jsStringArray(v js.Value) []string {
 
 type jsError struct {
 	message string
+	err     error
 }
 
 func (e *jsError) Error() string {
 	return e.message
+}
+
+// Unwrap exposes the classified cause so the JS error code can be set.
+func (e *jsError) Unwrap() error {
+	return e.err
 }

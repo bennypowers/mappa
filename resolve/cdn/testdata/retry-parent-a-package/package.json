@@ -1,0 +1,1 @@
+{"name":"retry-parent-a","version":"1.0.0","exports":{".":"./index.js"},"dependencies":{"retry-shared":"^1.0.0"}}

@@ -29,11 +29,31 @@ import (
 	"sync"
 )
 
+// packumentAccept asks the registry for the abbreviated packument format.
+// It is significantly smaller than the full document and contains everything
+// mappa needs (versions and dist-tags).
+const packumentAccept = "application/vnd.npm.install-v1+json"
+
+// maxInflightPackuments bounds the number of packument fetches that can be
+// coalesced at once. Beyond this, requests proceed independently.
+const maxInflightPackuments = 64
+
 // Registry provides access to the npm registry for package metadata.
 type Registry struct {
 	fetcher      Fetcher
 	baseURL      string
 	versionCache *VersionCache
+
+	inflightMu sync.Mutex
+	inflight   map[string]*packumentCall
+}
+
+// packumentCall represents one in-flight packument fetch shared by concurrent
+// callers interested in the same package.
+type packumentCall struct {
+	done chan struct{}
+	pkg  *RegistryPackage
+	err  error
 }
 
 // RegistryPackage represents package metadata from the npm registry.
@@ -52,10 +72,7 @@ type RegistryVersion struct {
 // VersionCache caches resolved versions to avoid repeated registry lookups.
 // Has a maximum size with LRU eviction to prevent unbounded memory growth.
 type VersionCache struct {
-	mu      sync.RWMutex
-	entries map[string]string // pkgName@range -> resolved version
-	order   []string          // LRU order tracking
-	maxSize int
+	lru *lru[string]
 }
 
 // NewRegistry creates a new npm registry client.
@@ -64,6 +81,7 @@ func NewRegistry(fetcher Fetcher) *Registry {
 		fetcher:      fetcher,
 		baseURL:      "https://registry.npmjs.org",
 		versionCache: NewVersionCache(),
+		inflight:     make(map[string]*packumentCall),
 	}
 }
 
@@ -73,6 +91,7 @@ func NewRegistryWithURL(fetcher Fetcher, baseURL string) *Registry {
 		fetcher:      fetcher,
 		baseURL:      strings.TrimSuffix(baseURL, "/"),
 		versionCache: NewVersionCache(),
+		inflight:     make(map[string]*packumentCall),
 	}
 }
 
@@ -86,50 +105,17 @@ func NewVersionCacheWithSize(maxSize int) *VersionCache {
 	if maxSize <= 0 {
 		maxSize = 1000
 	}
-	return &VersionCache{
-		entries: make(map[string]string),
-		order:   make([]string, 0, maxSize),
-		maxSize: maxSize,
-	}
+	return &VersionCache{lru: newLRU[string](maxSize)}
 }
 
 // Get retrieves a cached version resolution.
 func (c *VersionCache) Get(pkgName, versionRange string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	key := pkgName + "@" + versionRange
-	version, ok := c.entries[key]
-	return version, ok
+	return c.lru.get(pkgName + "@" + versionRange)
 }
 
 // Set stores a version resolution in the cache.
 func (c *VersionCache) Set(pkgName, versionRange, resolvedVersion string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	key := pkgName + "@" + versionRange
-
-	// Update existing entry and refresh LRU order
-	if _, exists := c.entries[key]; exists {
-		c.entries[key] = resolvedVersion
-		for i, k := range c.order {
-			if k == key {
-				c.order = append(c.order[:i], c.order[i+1:]...)
-				break
-			}
-		}
-		c.order = append(c.order, key)
-		return
-	}
-
-	// Evict oldest if at capacity
-	if len(c.entries) >= c.maxSize {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		delete(c.entries, oldest)
-	}
-
-	c.entries[key] = resolvedVersion
-	c.order = append(c.order, key)
+	c.lru.set(pkgName+"@"+versionRange, resolvedVersion)
 }
 
 // ResolveVersion resolves a semver range to a specific version.
@@ -139,36 +125,83 @@ func (r *Registry) ResolveVersion(ctx context.Context, pkgName, versionRange str
 		return cached, nil
 	}
 
-	// An exact version needs no registry lookup.
+	// An exact version needs no registry lookup. This also means exact
+	// versions never reach resolveVersionFromPackage, so it needs no exact
+	// match branch of its own.
 	if isExactVersion(versionRange) {
-		exact := strings.TrimPrefix(strings.TrimSpace(versionRange), "v")
-		r.versionCache.Set(pkgName, versionRange, exact)
-		return exact, nil
+		return strings.TrimPrefix(strings.TrimSpace(versionRange), "v"), nil
 	}
 
-	// Fetch package metadata from registry
-	url := fmt.Sprintf("%s/%s", r.baseURL, pkgName)
-	data, err := r.fetcher.Fetch(ctx, url)
+	pkg, err := r.fetchPackument(ctx, pkgName)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch package %s: %w", pkgName, err)
 	}
 
-	var pkg RegistryPackage
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return "", fmt.Errorf("failed to parse package metadata for %s: %w", pkgName, err)
-	}
-
 	// Resolve the version
-	resolved, err := resolveVersionFromPackage(&pkg, versionRange)
+	resolved, err := resolveVersionFromPackage(pkg, versionRange)
 	if err != nil {
 		return "", err
 	}
 
-	// Cache both the range and the exact version so recursive calls that
-	// already have a concrete version don't refetch the packument.
 	r.versionCache.Set(pkgName, versionRange, resolved)
-	r.versionCache.Set(pkgName, resolved, resolved)
 	return resolved, nil
+}
+
+// fetchPackument fetches and parses package metadata, coalescing concurrent
+// requests for the same package into a single registry call. Failures are not
+// cached, so a later call retries.
+func (r *Registry) fetchPackument(ctx context.Context, pkgName string) (*RegistryPackage, error) {
+	r.inflightMu.Lock()
+	if call, ok := r.inflight[pkgName]; ok {
+		r.inflightMu.Unlock()
+		select {
+		case <-call.done:
+			return call.pkg, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Only coalesce while the in-flight map has room. Beyond the bound,
+	// requests proceed independently rather than blocking on each other.
+	if len(r.inflight) < maxInflightPackuments {
+		call := &packumentCall{done: make(chan struct{})}
+		r.inflight[pkgName] = call
+		r.inflightMu.Unlock()
+
+		pkg, err := r.doFetchPackument(ctx, pkgName)
+		call.pkg, call.err = pkg, err
+		r.inflightMu.Lock()
+		delete(r.inflight, pkgName)
+		r.inflightMu.Unlock()
+		close(call.done)
+		return pkg, err
+	}
+	r.inflightMu.Unlock()
+
+	return r.doFetchPackument(ctx, pkgName)
+}
+
+func (r *Registry) doFetchPackument(ctx context.Context, pkgName string) (*RegistryPackage, error) {
+	url := fmt.Sprintf("%s/%s", r.baseURL, pkgName)
+	data, err := fetchWithAccept(ctx, r.fetcher, url, packumentAccept)
+	if err != nil {
+		return nil, err
+	}
+
+	var pkg RegistryPackage
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return nil, fmt.Errorf("failed to parse package metadata for %s: %w", pkgName, err)
+	}
+	return &pkg, nil
+}
+
+// fetchWithAccept sends a media type hint when the fetcher supports headers.
+func fetchWithAccept(ctx context.Context, fetcher Fetcher, url, accept string) ([]byte, error) {
+	if hf, ok := fetcher.(HeaderFetcher); ok {
+		return hf.FetchWithHeaders(ctx, url, map[string]string{"Accept": accept})
+	}
+	return fetcher.Fetch(ctx, url)
 }
 
 // exactVersionPattern matches complete semantic versions.
@@ -205,10 +238,8 @@ func resolveVersionFromPackage(pkg *RegistryPackage, versionRange string) (strin
 		return tag, nil
 	}
 
-	// Handle exact version
-	if _, ok := pkg.Versions[versionRange]; ok {
-		return versionRange, nil
-	}
+	// Exact versions never reach this function: ResolveVersion short-circuits
+	// them before fetching a packument.
 
 	// Collect and sort all versions
 	versions := make([]string, 0, len(pkg.Versions))
