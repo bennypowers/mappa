@@ -15,5 +15,21 @@ if (!existsSync(target)) {
   process.exit(0);
 }
 
-const result = spawnSync(process.execPath, [target], { stdio: "inherit" });
+const timeoutMs = 10 * 60 * 1000;
+const result = spawnSync(process.execPath, [target], {
+  // Ignore stdin so the wrapper never consumes the installer's input.
+  stdio: ["ignore", "inherit", "inherit"],
+  timeout: timeoutMs,
+});
+
+if (result.error) {
+  if (result.error.code === "ETIMEDOUT") {
+    console.error(`mappa postinstall timed out after ${timeoutMs}ms`);
+  } else {
+    console.error(`mappa postinstall failed to launch: ${result.error.message}`);
+  }
+}
+if (result.signal) {
+  console.error(`mappa postinstall was terminated by signal ${result.signal}`);
+}
 process.exit(result.status ?? 1);
