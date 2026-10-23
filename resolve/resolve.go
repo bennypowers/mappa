@@ -18,6 +18,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package resolve
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -42,6 +43,26 @@ type Logger interface {
 type WorkspacePackage struct {
 	Name string // Package name from package.json
 	Path string // Absolute path to package directory
+}
+
+// MaxDependencyEntries caps the number of dependencies accepted from a single
+// package.json, preventing unbounded goroutine fan-out from untrusted manifests.
+const MaxDependencyEntries = 10000
+
+// DependencyCapError returns the standard error for a manifest that declares
+// more dependencies than MaxDependencyEntries. kind names the manifest, for
+// example "package.json" or "workspace".
+func DependencyCapError(kind string, count int) error {
+	return fmt.Errorf("%s declares %d dependencies (maximum %d)", kind, count, MaxDependencyEntries)
+}
+
+// IsWithinDir reports whether p resolves inside root after cleaning.
+func IsWithinDir(root, p string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // FindWorkspaceRoot walks up the directory tree to find the workspace root.
