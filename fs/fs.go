@@ -138,10 +138,21 @@ func (f *OSFileSystem) OpenRoot(name string) (*os.Root, error) {
 	return os.OpenRoot(name)
 }
 
-// WriteFileAtomic writes data to a temporary file in the same directory and
-// renames it over name, so readers never observe a partial file.
+// WriteFileAtomic writes data to a temporary file in the target's directory
+// and renames it over the target, so readers never observe a partial file.
+// Existing destination permissions are preserved. A symlink destination is
+// resolved so the link itself survives and its target is replaced.
 func (f *OSFileSystem) WriteFileAtomic(name string, data []byte, perm fs.FileMode) error {
-	dir := filepath.Dir(name)
+	target := name
+	if resolved, err := filepath.EvalSymlinks(name); err == nil {
+		target = resolved
+	}
+	mode := perm
+	if info, err := os.Stat(target); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".mappa-*")
 	if err != nil {
 		return err
@@ -158,14 +169,14 @@ func (f *OSFileSystem) WriteFileAtomic(name string, data []byte, perm fs.FileMod
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Chmod(perm); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, name); err != nil {
+	if err := os.Rename(tmpName, target); err != nil {
 		return err
 	}
 	renamed = true

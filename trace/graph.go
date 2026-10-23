@@ -547,21 +547,29 @@ func containsPath(root, p string) bool {
 // the backend supports it and the path is under an allowed root. A rooted
 // read makes containment an OS guarantee instead of a check-then-read.
 func (t *Tracer) readFile(path string) ([]byte, error) {
-	if root, rel, ok := t.rootFor(path); ok {
-		if rooted, ok := t.fs.(fs.RootedFS); ok {
-			r, err := rooted.OpenRoot(root)
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = r.Close() }()
-			return r.ReadFile(rel)
+	rooted, ok := t.fs.(fs.RootedFS)
+	if !ok {
+		return t.fs.ReadFile(path)
+	}
+	resolved := resolveSymlinks(t.fs, path)
+	if root, rel, ok := t.rootForResolved(resolved); ok {
+		r, err := rooted.OpenRoot(root)
+		if err != nil {
+			return nil, err
 		}
+		defer func() { _ = r.Close() }()
+		return r.ReadFile(rel)
+	}
+	// A path that is lexically inside a root but resolves outside it is a
+	// symlink escape; do not fall back to an unconfined read.
+	if _, _, lexical := t.rootFor(path); lexical {
+		return nil, fmt.Errorf("refusing to read %s: resolved path escapes allowed roots", path)
 	}
 	return t.fs.ReadFile(path)
 }
 
-// rootFor returns the longest allowed root containing path and the path
-// relative to it.
+// rootFor returns the longest allowed root lexically containing path and the
+// path relative to it.
 func (t *Tracer) rootFor(path string) (root, rel string, ok bool) {
 	for _, candidate := range t.allowedRoots() {
 		if !containsPath(candidate, path) || len(candidate) <= len(root) {
@@ -572,6 +580,24 @@ func (t *Tracer) rootFor(path string) (root, rel string, ok bool) {
 			continue
 		}
 		root, rel, ok = candidate, r, true
+	}
+	return root, rel, ok
+}
+
+// rootForResolved returns the longest allowed root containing the already
+// resolved path, resolving the roots themselves so symlinked workspace
+// packages map to their real directory.
+func (t *Tracer) rootForResolved(path string) (root, rel string, ok bool) {
+	for _, candidate := range t.allowedRoots() {
+		resolvedRoot := resolveSymlinks(t.fs, candidate)
+		if !containsPath(resolvedRoot, path) || len(resolvedRoot) <= len(root) {
+			continue
+		}
+		r, err := filepath.Rel(resolvedRoot, path)
+		if err != nil {
+			continue
+		}
+		root, rel, ok = resolvedRoot, r, true
 	}
 	return root, rel, ok
 }

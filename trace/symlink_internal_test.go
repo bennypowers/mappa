@@ -63,6 +63,34 @@ func TestAllowPathRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestReadFileThroughWorkspaceSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	ws := t.TempDir()
+	pkg := filepath.Join(ws, "packages", "lib")
+	if err := os.MkdirAll(filepath.Join(ws, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "index.js"), []byte("export {};"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(pkg, filepath.Join(ws, "node_modules", "lib")); err != nil {
+		t.Fatal(err)
+	}
+
+	tracer := NewTracer(fs.NewOSFileSystem(), ws).
+		WithNodeModules(filepath.Join(ws, "node_modules")).
+		WithAllowedPaths([]string{pkg})
+
+	if _, err := tracer.readFile(filepath.Join(ws, "node_modules", "lib", "index.js")); err != nil {
+		t.Fatalf("read through workspace symlink failed: %v", err)
+	}
+}
+
 func TestReadFileRejectsEscapeThroughRootedFS(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires privileges on Windows")

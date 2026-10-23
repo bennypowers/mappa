@@ -1431,7 +1431,7 @@ func TestInjectPartialFailureExitsNonZero(t *testing.T) {
 	if !strings.Contains(stderr, "bad.html") {
 		t.Errorf("Expected the failing file on stderr, got: %s", stderr)
 	}
-	if !strings.Contains(stdout, "would") {
-		t.Errorf("Expected the good file to be reported, got: %s", stdout)
+	if !strings.Contains(stdout, "would insert into") || !strings.Contains(stdout, "index.html") {
+		t.Errorf("Expected the good file to be reported as a dry-run insertion, got: %s", stdout)
 	}
 }

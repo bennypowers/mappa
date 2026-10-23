@@ -81,6 +81,81 @@ func TestOSFileSystemWriteFileAtomic(t *testing.T) {
 	}
 }
 
+func TestOSFileSystemWriteFileAtomicPreservesMode(t *testing.T) {
+	dir := t.TempDir()
+	name := filepath.Join(dir, "out.html")
+	if err := os.WriteFile(name, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	osfs := fs.NewOSFileSystem()
+	if err := osfs.WriteFileAtomic(name, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %o, want 600 (existing destination mode)", got)
+	}
+
+	fresh := filepath.Join(dir, "fresh.html")
+	if err := osfs.WriteFileAtomic(fresh, []byte("new"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Errorf("mode = %o, want 640 (requested mode for new file)", got)
+	}
+}
+
+func TestOSFileSystemWriteFileAtomicKeepsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.html")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.html")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	osfs := fs.NewOSFileSystem()
+	if err := osfs.WriteFileAtomic(link, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("atomic write replaced the symlink instead of its target")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" {
+		t.Errorf("target content = %q, want %q", got, "new")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("expected only target and link, got %d entries: %v", len(entries), entries)
+	}
+}
+
 func TestOSFileSystemEvalSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires privileges on Windows")
