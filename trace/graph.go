@@ -152,15 +152,22 @@ type Tracer struct {
 	// moduleCache caches traced modules by path (thread-safe).
 	// Used for cross-file caching in batch mode.
 	moduleCache *sync.Map // map[string]*Module
+
+	// resolvedRootsOnce and resolvedRoots cache the allowed roots after
+	// symlink resolution. The Tracer is immutable after construction, so the
+	// roots need resolving only once rather than on every read.
+	resolvedRootsOnce *sync.Once
+	resolvedRoots     []string
 }
 
 // NewTracer creates a new Tracer for the given root directory.
 func NewTracer(fs fs.FileSystem, rootDir string) *Tracer {
 	return &Tracer{
-		fs:          fs,
-		rootDir:     rootDir,
-		pkgCache:    packagejson.NewMemoryCache(),
-		moduleCache: &sync.Map{},
+		fs:                fs,
+		rootDir:           rootDir,
+		pkgCache:          packagejson.NewMemoryCache(),
+		moduleCache:       &sync.Map{},
+		resolvedRootsOnce: &sync.Once{},
 	}
 }
 
@@ -169,6 +176,9 @@ func (t *Tracer) clone() *Tracer {
 	c := *t
 	c.conditions = slices.Clone(t.conditions)
 	c.allowedPaths = slices.Clone(t.allowedPaths)
+	// The clone may have different roots, so discard the parent's cache.
+	c.resolvedRootsOnce = &sync.Once{}
+	c.resolvedRoots = nil
 	return &c
 }
 
@@ -339,13 +349,14 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 		}
 	} else {
 		// Read and parse the module
-		if !t.allowPath(modulePath) {
+		resolvedPath, allowed := t.allowPathResolved(modulePath)
+		if !allowed {
 			return fmt.Errorf("refusing to read module outside allowed roots: %s", modulePath)
 		}
 		if info, err := t.fs.Stat(modulePath); err == nil && info.Size() > maxModuleSize {
 			return fmt.Errorf("module %s exceeds maximum size (%d bytes)", modulePath, maxModuleSize)
 		}
-		content, err := t.readFile(modulePath)
+		content, err := t.readFileResolved(modulePath, resolvedPath)
 		if err != nil {
 			return err
 		}
@@ -525,24 +536,20 @@ func (t *Tracer) resolvePath(baseDir, specifier string) string {
 	return filepath.Join(baseDir, specifier)
 }
 
-// containsPath reports whether p is inside root after canonicalization.
-func containsPath(root, p string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
 // readFile reads path, preferring a confined read through fs.RootedFS when
 // the backend supports it and the path is under an allowed root. A rooted
 // read makes containment an OS guarantee instead of a check-then-read.
 func (t *Tracer) readFile(path string) ([]byte, error) {
+	return t.readFileResolved(path, resolveSymlinks(t.fs, path))
+}
+
+// readFileResolved reads path using an already resolved module path, avoiding
+// a second symlink resolution after allowPath.
+func (t *Tracer) readFileResolved(path, resolved string) ([]byte, error) {
 	rooted, ok := t.fs.(fs.RootedFS)
 	if !ok {
 		return t.fs.ReadFile(path)
 	}
-	resolved := resolveSymlinks(t.fs, path)
 	if root, rel, ok := t.rootForResolved(resolved); ok {
 		r, err := rooted.OpenRoot(root)
 		if err != nil {
@@ -563,7 +570,7 @@ func (t *Tracer) readFile(path string) ([]byte, error) {
 // path relative to it.
 func (t *Tracer) rootFor(path string) (root, rel string, ok bool) {
 	for _, candidate := range t.allowedRoots() {
-		if !containsPath(candidate, path) || len(candidate) <= len(root) {
+		if !resolve.IsWithinDir(candidate, path) || len(candidate) <= len(root) {
 			continue
 		}
 		r, err := filepath.Rel(candidate, path)
@@ -579,9 +586,8 @@ func (t *Tracer) rootFor(path string) (root, rel string, ok bool) {
 // resolved path, resolving the roots themselves so symlinked workspace
 // packages map to their real directory.
 func (t *Tracer) rootForResolved(path string) (root, rel string, ok bool) {
-	for _, candidate := range t.allowedRoots() {
-		resolvedRoot := resolveSymlinks(t.fs, candidate)
-		if !containsPath(resolvedRoot, path) || len(resolvedRoot) <= len(root) {
+	for _, resolvedRoot := range t.resolvedAllowedRoots() {
+		if !resolve.IsWithinDir(resolvedRoot, path) || len(resolvedRoot) <= len(root) {
 			continue
 		}
 		r, err := filepath.Rel(resolvedRoot, path)
@@ -608,13 +614,33 @@ func (t *Tracer) allowedRoots() []string {
 // first so a link cannot escape. Resolution happens before the read; a path
 // swapped for a symlink after this check is still subject to that race.
 func (t *Tracer) allowPath(p string) bool {
+	_, ok := t.allowPathResolved(p)
+	return ok
+}
+
+// allowPathResolved reports whether p is inside the allowed roots and returns
+// the resolved path so callers can reuse it for the subsequent read.
+func (t *Tracer) allowPathResolved(p string) (string, bool) {
 	resolved := resolveSymlinks(t.fs, p)
-	for _, root := range t.allowedRoots() {
-		if containsPath(resolveSymlinks(t.fs, root), resolved) {
-			return true
+	for _, root := range t.resolvedAllowedRoots() {
+		if resolve.IsWithinDir(root, resolved) {
+			return resolved, true
 		}
 	}
-	return false
+	return resolved, false
+}
+
+// resolvedAllowedRoots returns the allowed roots after resolving symlinks.
+// The result is computed once per Tracer; builders reset the cache.
+func (t *Tracer) resolvedAllowedRoots() []string {
+	t.resolvedRootsOnce.Do(func() {
+		roots := t.allowedRoots()
+		t.resolvedRoots = make([]string, len(roots))
+		for i, root := range roots {
+			t.resolvedRoots[i] = resolveSymlinks(t.fs, root)
+		}
+	})
+	return t.resolvedRoots
 }
 
 // resolveSymlinks resolves p when the FileSystem supports it. File systems

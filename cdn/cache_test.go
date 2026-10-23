@@ -18,6 +18,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cdn
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -346,5 +347,56 @@ func TestPackageCacheRetriesAfterError(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Errorf("expected 2 loader calls, got %d", calls.Load())
+	}
+}
+
+func TestPackageCacheWaiterRetriesAfterLeaderContextFailure(t *testing.T) {
+	cache := NewPackageCache(10)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	leaderDone := make(chan error, 1)
+
+	go func() {
+		_, err := cache.GetOrLoad("lit", "3.0.0", func() (*packagejson.PackageJSON, error) {
+			close(started)
+			<-release
+			return nil, context.Canceled
+		})
+		leaderDone <- err
+	}()
+
+	<-started
+
+	var waiterLoads atomic.Int32
+	type waiterResult struct {
+		pkg *packagejson.PackageJSON
+		err error
+	}
+	waiterDone := make(chan waiterResult, 1)
+	go func() {
+		pkg, err := cache.GetOrLoad("lit", "3.0.0", func() (*packagejson.PackageJSON, error) {
+			waiterLoads.Add(1)
+			return &packagejson.PackageJSON{Name: "lit", Version: "3.0.0"}, nil
+		})
+		waiterDone <- waiterResult{pkg: pkg, err: err}
+	}()
+
+	// Give the waiter time to join the in-flight load before the leader fails.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	if err := <-leaderDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected the leader to fail with context.Canceled, got %v", err)
+	}
+	got := <-waiterDone
+	if got.err != nil {
+		t.Fatalf("expected the live waiter to retry, got %v", got.err)
+	}
+	if got.pkg == nil || got.pkg.Name != "lit" {
+		t.Errorf("unexpected waiter package: %+v", got.pkg)
+	}
+	if waiterLoads.Load() != 1 {
+		t.Errorf("expected the waiter's loader to run once, got %d", waiterLoads.Load())
 	}
 }

@@ -431,13 +431,27 @@ func matchVersion(versions []string, versionRange string) string {
 		return matchOrRange(versions, versionRange)
 	}
 
-	// Handle caret ranges (^1.2.3)
+	// Handle whitespace-separated comparator sets before the single-prefix
+	// branches, which would otherwise treat the rest of the set as part of
+	// the first comparator's version.
+	if isCompoundComparatorSet(versionRange) {
+		return matchComparatorSet(versions, versionRange)
+	}
+
+	// Handle caret ranges (^1.2.3); x-range bases like ^1.x delegate to the
+	// x-range matcher because they have no concrete version to compare.
 	if base, ok := strings.CutPrefix(versionRange, "^"); ok {
+		if isXRange(base) {
+			return matchXRange(versions, base)
+		}
 		return matchCaretRange(versions, base)
 	}
 
 	// Handle tilde ranges (~1.2.3)
 	if base, ok := strings.CutPrefix(versionRange, "~"); ok {
+		if isXRange(base) {
+			return matchXRange(versions, base)
+		}
 		return matchTildeRange(versions, base)
 	}
 
@@ -517,6 +531,57 @@ func matchVersion(versions []string, versionRange string) string {
 		return versionRange
 	}
 
+	return ""
+}
+
+// isXRange reports whether a range component uses an x, X, or * wildcard.
+func isXRange(s string) bool {
+	return strings.ContainsAny(s, "xX*")
+}
+
+// isCompoundComparatorSet reports whether r is a whitespace-separated
+// intersection of comparator constraints, such as ">=1.0.0 <2.0.0". Hyphen
+// ranges and dist-tags are not comparator sets.
+func isCompoundComparatorSet(r string) bool {
+	if strings.Contains(r, " - ") || strings.Contains(r, "||") {
+		return false
+	}
+	fields := strings.Fields(r)
+	if len(fields) < 2 {
+		return false
+	}
+	for _, field := range fields {
+		if field == "" || !strings.ContainsRune("^~><=", rune(field[0])) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchComparatorSet returns the highest version satisfying every comparator
+// in a whitespace-separated set.
+func matchComparatorSet(versions []string, rangeStr string) string {
+	parts := strings.Fields(rangeStr)
+	var matches []string
+	for _, v := range versions {
+		sv, err := parseSemver(v)
+		if err != nil || sv.Prerelease != "" {
+			continue
+		}
+		satisfies := true
+		for _, part := range parts {
+			if !versionSatisfies(v, part) {
+				satisfies = false
+				break
+			}
+		}
+		if satisfies {
+			matches = append(matches, v)
+		}
+	}
+	if len(matches) > 0 {
+		return matches[len(matches)-1]
+	}
 	return ""
 }
 
@@ -798,9 +863,15 @@ func versionSatisfies(version, constraint string) bool {
 		return compareSemver(version, strings.TrimSpace(base)) < 0
 	}
 	if base, ok := strings.CutPrefix(constraint, "^"); ok {
+		if isXRange(base) {
+			return matchXRange([]string{version}, base) != ""
+		}
 		return matchCaretRange([]string{version}, base) != ""
 	}
 	if base, ok := strings.CutPrefix(constraint, "~"); ok {
+		if isXRange(base) {
+			return matchXRange([]string{version}, base) != ""
+		}
 		return matchTildeRange([]string{version}, base) != ""
 	}
 	if base, ok := strings.CutPrefix(constraint, "="); ok {

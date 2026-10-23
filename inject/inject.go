@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -97,7 +96,9 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 		pkg := setup.Package
 		if setup.PackageErr != nil && osfs.Exists(filepath.Join(absRoot, "package.json")) {
 			// File exists but is malformed - warn but continue
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", filepath.Join(absRoot, "package.json"), setup.PackageErr)
+			if opts.Logger != nil {
+				opts.Logger.Warning("failed to parse %s: %v", filepath.Join(absRoot, "package.json"), setup.PackageErr)
+			}
 		}
 		tracer := setup.Tracer
 
@@ -116,7 +117,7 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 
 		// Memoize resolutions by the file's bare-specifier set. Many pages in
 		// a batch share the same dependency set.
-		memo := &sync.Map{} // map[string]*importmap.ImportMap
+		memo := trace.NewResolutionMemo()
 
 		// Create jobs channel
 		jobs := make(chan string, len(files))
@@ -145,7 +146,7 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 }
 
 // injectFile processes a single HTML file and injects/updates its import map.
-func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, opts Options, memo *sync.Map) Result {
+func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, opts Options, memo *trace.ResolutionMemo) Result {
 	result := Result{File: htmlFile}
 
 	// Read HTML content
@@ -234,7 +235,7 @@ func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoo
 // caller records a failure instead of claiming a partial map succeeded.
 // Non-fatal resolution warnings are logged when logger is non-nil. The
 // returned map may be shared through memo and must be treated as read-only.
-func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, logger resolve.Logger, memo *sync.Map) (*importmap.ImportMap, error) {
+func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, logger resolve.Logger, memo *trace.ResolutionMemo) (*importmap.ImportMap, error) {
 	graph, err := tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return nil, err
@@ -251,17 +252,9 @@ func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, bas
 	}
 
 	bareSpecs := graph.BareSpecifiers()
-	memoKey := strings.Join(bareSpecs, "\x00")
-	if cached, ok := memo.Load(memoKey); ok {
-		return cached.(*importmap.ImportMap), nil
-	}
-
-	resolved, err := trace.ResolveForSpecifiers(baseResolver, workspaceRoot, bareSpecs, pkg)
-	if err != nil {
-		return nil, err
-	}
-	memo.Store(memoKey, resolved)
-	return resolved, nil
+	return memo.Resolve(trace.MemoKey(bareSpecs), func() (*importmap.ImportMap, error) {
+		return trace.ResolveForSpecifiers(baseResolver, workspaceRoot, bareSpecs, pkg)
+	})
 }
 
 // indentLines prefixes each non-empty line in s with the given indent.

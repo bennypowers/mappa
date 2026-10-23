@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "escaper/ok": "/node_modules/escaper/ok.js",
+    "parent": "/node_modules/parent/index.js"
+  },
+  "scopes": {
+    "/node_modules/parent/": {
+      "child/ok": "/node_modules/child/ok.js"
+    }
+  }
+}

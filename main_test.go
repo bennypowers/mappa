@@ -1388,7 +1388,7 @@ func TestTraceSpecifiersHonorsConditions(t *testing.T) {
 	}
 }
 
-func TestTraceBatchDeepImportWarningInErrorsField(t *testing.T) {
+func TestTraceBatchDeepImportWarningInWarningsField(t *testing.T) {
 	fixtureDir := filepath.Join("testdata", "trace", "unresolvable")
 	file1 := filepath.Join(fixtureDir, "page.html")
 	file2 := filepath.Join(fixtureDir, "page2.html")
@@ -1403,19 +1403,19 @@ func TestTraceBatchDeepImportWarningInErrorsField(t *testing.T) {
 	}
 	for _, line := range lines {
 		var result struct {
-			Errors []string `json:"errors"`
+			Warnings []string `json:"warnings"`
 		}
 		if err := json.Unmarshal([]byte(line), &result); err != nil {
 			t.Fatalf("Invalid NDJSON: %v", err)
 		}
 		found := false
-		for _, msg := range result.Errors {
+		for _, msg := range result.Warnings {
 			if strings.Contains(msg, "@example/core/button/button.js") {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("Expected the deep-import warning in the errors field: %s", line)
+			t.Errorf("Expected the deep-import warning in the warnings field: %s", line)
 		}
 	}
 }
