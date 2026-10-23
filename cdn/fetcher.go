@@ -23,9 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
-
-	"github.com/tinywasm/fetch"
 )
 
 // DefaultMaxResponseSize caps the size of a fetched response body (64 MiB).
@@ -60,8 +57,9 @@ type HeaderFetcher interface {
 	FetchWithHeaders(ctx context.Context, url string, headers map[string]string) ([]byte, error)
 }
 
-// HTTPFetcher implements Fetcher using tinywasm/fetch.
-// Works in both native and WASM builds with minimal binary size.
+// HTTPFetcher implements Fetcher.
+// Native builds stream through net/http and enforce the size limit while
+// reading; WASM builds use tinywasm/fetch, which buffers before delivery.
 type HTTPFetcher struct {
 	maxResponseSize int
 }
@@ -97,73 +95,20 @@ func (f *HTTPFetcher) FetchWithHeaders(ctx context.Context, url string, headers 
 	return f.fetch(ctx, url, headers)
 }
 
-func (f *HTTPFetcher) fetch(ctx context.Context, url string, headers map[string]string) ([]byte, error) {
-	type result struct {
-		body []byte
-		err  error
+// effectiveMaxResponseSize returns the configured limit or the default.
+func (f *HTTPFetcher) effectiveMaxResponseSize() int {
+	if f.maxResponseSize <= 0 {
+		return DefaultMaxResponseSize
 	}
-	done := make(chan result, 1)
+	return f.maxResponseSize
+}
 
-	req := fetch.Get(url)
-	for key, value := range headers {
-		req = req.Header(key, value)
-	}
-	deadline, hasDeadline := ctx.Deadline()
-	if hasDeadline {
-		if ms := int(time.Until(deadline).Milliseconds()); ms > 0 {
-			req = req.Timeout(ms)
-		}
-	}
-
-	maxSize := f.maxResponseSize
-	if maxSize <= 0 {
-		maxSize = DefaultMaxResponseSize
-	}
-
-	req.Send(func(resp *fetch.Response, err error) {
-		if err != nil {
-			// The transport may report an empty or unhelpful error when the
-			// request timeout fires. Fall back to the context state, which
-			// shares the same deadline.
-			ctxErr := ctx.Err()
-			if ctxErr == nil && hasDeadline && time.Until(deadline) <= 10*time.Millisecond {
-				// The transport timeout shares the context deadline but may
-				// fire a hair earlier; treat an error inside that window as a
-				// timeout.
-				ctxErr = context.DeadlineExceeded
-			}
-			if ctxErr != nil {
-				done <- result{nil, newContextFetchError(url, ctxErr)}
-				return
-			}
-			done <- result{nil, newFetchError(url, err)}
-			return
-		}
-		if resp.Status != 200 {
-			done <- result{nil, &FetchError{
-				URL:        url,
-				StatusCode: resp.Status,
-				Message:    fmt.Sprintf("HTTP %d", resp.Status),
-			}}
-			return
-		}
-		body := resp.Body()
-		if len(body) > maxSize {
-			done <- result{nil, &FetchError{
-				URL:     url,
-				Message: fmt.Sprintf("response exceeds maximum size (%d bytes)", maxSize),
-				Err:     ErrResponseTooLarge,
-			}}
-			return
-		}
-		done <- result{body, nil}
-	})
-
-	select {
-	case r := <-done:
-		return r.body, r.err
-	case <-ctx.Done():
-		return nil, newContextFetchError(url, ctx.Err())
+// newTooLargeError builds the error for a response over the configured limit.
+func newTooLargeError(url string, maxSize int) *FetchError {
+	return &FetchError{
+		URL:     url,
+		Message: fmt.Sprintf("response exceeds maximum size (%d bytes)", maxSize),
+		Err:     ErrResponseTooLarge,
 	}
 }
 

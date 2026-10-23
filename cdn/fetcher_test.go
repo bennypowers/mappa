@@ -72,6 +72,38 @@ func TestHTTPFetcherAcceptsBodyAboveLegacyLimit(t *testing.T) {
 	}
 }
 
+func TestHTTPFetcherBoundsReadWhileStreaming(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(strings.Repeat("x", 2048)))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := NewHTTPFetcher().WithMaxResponseSize(1024).Fetch(ctx, server.URL)
+	elapsed := time.Since(start)
+
+	if !IsTooLarge(err) {
+		t.Fatalf("expected ErrResponseTooLarge, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("oversized stream took %v; the limit was likely applied after buffering", elapsed)
+	}
+}
+
 func TestHTTPFetcherRespectsContextDeadline(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
