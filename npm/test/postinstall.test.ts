@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   mkdirSync,
   mkdtempSync,
@@ -104,6 +105,58 @@ describe("postinstall", () => {
       assert.deepEqual(JSON.parse(readFileSync(argvOut, "utf8")), [
         "install",
         "--no-save",
+        `${expectedPkg}@1.2.3`,
+      ]);
+    } finally {
+      cleanup(tmp);
+    }
+  });
+
+  it("uses yarn add when yarn launched the install", () => {
+    const expectedPkg =
+      platformPackages[`${process.platform}-${process.arch}`];
+    assert.ok(expectedPkg, "test requires a supported platform");
+
+    const tmp = makeTempInstall();
+    try {
+      writeFileSync(
+        join(tmp, "package.json"),
+        JSON.stringify({
+          name: "@pwrs/mappa-fixture",
+          type: "module",
+          version: "1.2.3",
+        })
+      );
+
+      const argvOut = join(tmp, "argv.json");
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+      const yarn = join(binDir, "yarn");
+      writeFileSync(
+        yarn,
+        '#!/usr/bin/env node\n' +
+          'import { writeFileSync } from "node:fs";\n' +
+          "writeFileSync(process.env.ARGV_OUT, JSON.stringify(process.argv.slice(2)));\n"
+      );
+      chmodSync(yarn, 0o755);
+
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        ARGV_OUT: argvOut,
+        npm_config_user_agent: "yarn/1.22.22 npm/? node/v22.0.0 linux x64",
+      };
+      delete env.npm_execpath;
+
+      const result = spawnSync(
+        process.execPath,
+        [join(tmp, "dist", "postinstall.js")],
+        { encoding: "utf8", env }
+      );
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(argvOut, "utf8")), [
+        "add",
         `${expectedPkg}@1.2.3`,
       ]);
     } finally {

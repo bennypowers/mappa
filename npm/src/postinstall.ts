@@ -67,8 +67,8 @@ if (!version) {
 
 const installArgs = ["install", "--no-save", `${pkg}@${version}`];
 
-// Prefer the npm CLI that is running this install. Executing npm-cli.js with
-// the current Node binary avoids shell:true and the bare "npm" command. On
+// Choose how to run the fallback install. Executing npm-cli.js with the
+// current Node binary avoids shell:true and the bare "npm" command. On
 // Windows without npm_execpath, spawning npm.cmd directly fails with EINVAL
 // (BatBadBut), so use the npm-cli.js inside the Node installation instead and
 // keep shell:true only as a last resort.
@@ -76,7 +76,21 @@ let command: string;
 let args: string[];
 let shell = false;
 
-if (process.env.npm_execpath) {
+// npm_execpath is not always a file Node can run with npm's arguments: Yarn
+// and pnpm point it at their own entry points, which reject
+// `install --no-save`. Use each manager's add form instead.
+const manager = (process.env.npm_config_user_agent ?? "").split("/")[0];
+
+if (manager === "yarn") {
+  command = "yarn";
+  args = ["add", `${pkg}@${version}`];
+  // Yarn is a shell wrapper on Windows, so it needs a shell to launch.
+  shell = platform === "win32";
+} else if (manager === "pnpm") {
+  command = "pnpm";
+  args = ["add", `${pkg}@${version}`];
+  shell = platform === "win32";
+} else if (process.env.npm_execpath) {
   command = process.execPath;
   args = [process.env.npm_execpath, ...installArgs];
 } else if (platform === "win32") {
