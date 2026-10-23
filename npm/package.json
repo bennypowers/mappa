@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsc",
     "postinstall": "node ./postinstall.cjs",
-    "test": "node --experimental-strip-types --test test/mappa.test.ts test/no-setup.test.ts"
+    "test": "node --experimental-strip-types --test test/mappa.test.ts test/no-setup.test.ts test/node-bridge.test.ts test/postinstall.test.ts"
   },
   "optionalDependencies": {
     "@pwrs/mappa-darwin-arm64": "0.0.7",

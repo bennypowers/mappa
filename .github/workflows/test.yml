@@ -52,7 +52,7 @@ jobs:
         working-directory: npm
         run: |
           npm run build
-          npx tsc --noEmit
+          npx tsc -p tsconfig.test.json
       - name: Run npm tests
         working-directory: npm
         run: npm test

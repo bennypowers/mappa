@@ -60,8 +60,11 @@ interface GoConstructor {
 }
 
 interface MappaApi {
-  generate(packageJson: string, options?: GenerateOptions): Promise<string>;
-  resolve(rootDir: string, options?: ResolveOptions): Promise<string>;
+  generate(
+    packageJson: string,
+    options?: GenerateOptions | null
+  ): Promise<string>;
+  resolve(rootDir: string, options?: ResolveOptions | null): Promise<string>;
   version: string;
 }
 
@@ -72,6 +75,48 @@ declare global {
 
 let initPromise: Promise<MappaApi> | null = null;
 
+const generateOptionKeys = [
+  "cdn",
+  "template",
+  "conditions",
+  "exclude",
+  "timeoutMs",
+  "allowPartial",
+] as const;
+
+const resolveOptionKeys = [
+  "template",
+  "conditions",
+  "includePackages",
+  "exclude",
+  "inputMap",
+  "optimize",
+  "pathBase",
+  "packageDeps",
+] as const;
+
+// Copy caller options into a fresh plain object before they cross into Go.
+// syscall/js property access is unguarded: a throwing getter or Proxy trap on
+// the original object would abort the host process instead of rejecting the
+// promise. Reading the known keys here keeps any such throw inside JS.
+function normalizeOptions<T>(
+  options: T | undefined | null,
+  keys: readonly string[]
+): T | undefined | null {
+  if (options === undefined || options === null) return options;
+  if (typeof options !== "object") return options;
+
+  const normalized: Record<string, unknown> = {};
+  for (const key of keys) {
+    const value = (options as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+    // Array.from would turn non-arrays into arrays, so only copy real arrays.
+    // Anything else passes through for Go to validate.
+    normalized[key] = Array.isArray(value) ? value.slice() : value;
+  }
+  return normalized as T;
+}
+
 async function init(): Promise<MappaApi> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
@@ -81,8 +126,11 @@ async function init(): Promise<MappaApi> {
     // importing wasm_exec.js; otherwise local resolution silently fails.
     if (typeof process !== "undefined" && process.versions?.node) {
       const g = globalThis as Record<string, unknown>;
-      if (!g.fs) g.fs = await import("node:fs");
-      if (!g.path) g.path = await import("node:path");
+      // Assign unconditionally. A pre-existing globalThis.fs or globalThis.path
+      // may be the ENOSYS stub installed by an earlier wasm_exec.js import, and
+      // keeping it makes local resolution silently return an empty map.
+      g.fs = await import("node:fs");
+      g.path = await import("node:path");
     }
 
     await import(pathToFileURL(join(__dirname, "wasm_exec.js")).href);
@@ -134,7 +182,10 @@ export async function generate(
     typeof packageJson === "string"
       ? packageJson
       : JSON.stringify(packageJson);
-  const resultStr = await mappa.generate(input, options);
+  const resultStr = await mappa.generate(
+    input,
+    normalizeOptions(options, generateOptionKeys)
+  );
   return JSON.parse(resultStr);
 }
 
@@ -146,7 +197,10 @@ export async function resolve(
   options?: ResolveOptions
 ): Promise<ImportMap> {
   const mappa = await init();
-  const resultStr = await mappa.resolve(rootDir, options);
+  const resultStr = await mappa.resolve(
+    rootDir,
+    normalizeOptions(options, resolveOptionKeys)
+  );
   return JSON.parse(resultStr);
 }
 

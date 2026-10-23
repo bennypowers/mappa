@@ -48,6 +48,7 @@ lint-shell:
 
 test-scripts:
 	@./scripts/release-notes/test.sh
+	@./scripts/version.test.sh
 
 # Cross-compilation targets for go-release-workflows
 # Requires CGO for tree-sitter bindings

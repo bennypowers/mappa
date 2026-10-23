@@ -7,12 +7,6 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// When running from source (for example `npm install` in the repo before
-// `npm run build`), there is no dist entry point; do nothing.
-if (!existsSync(join(__dirname, "postinstall.js"))) {
-  process.exit(0);
-}
-
 const platformPackages: Record<string, string> = {
   "darwin-x64": "@pwrs/mappa-darwin-x64",
   "darwin-arm64": "@pwrs/mappa-darwin-arm64",
@@ -48,29 +42,79 @@ try {
 // Read this package's own version so the fallback install is pinned and
 // cannot pull a binary that mismatches the wrapper.
 let version: string;
+let versionError: unknown;
 try {
   const own = JSON.parse(
     readFileSync(join(__dirname, "..", "package.json"), "utf8")
   ) as { version?: string };
   version = own.version ?? "";
-} catch {
+} catch (err) {
+  versionError = err;
   version = "";
 }
 
 if (!version) {
   console.error("mappa: could not determine package version for fallback install");
+  if (versionError) {
+    console.error(
+      `mappa: ${
+        versionError instanceof Error ? versionError.message : String(versionError)
+      }`
+    );
+  }
   process.exit(1);
 }
 
-// Prefer the npm CLI that is running this install. Executing npm-cli.js with
-// the current Node binary avoids shell:true and the bare "npm" command.
-const npmExecPath = process.env.npm_execpath;
-const command = npmExecPath ? process.execPath : platform === "win32" ? "npm.cmd" : "npm";
-const args = npmExecPath
-  ? [npmExecPath, "install", "--no-save", `${pkg}@${version}`]
-  : ["install", "--no-save", `${pkg}@${version}`];
+const installArgs = ["install", "--no-save", `${pkg}@${version}`];
 
-const result = spawnSync(command, args, { stdio: "inherit", shell: false });
+// Prefer the npm CLI that is running this install. Executing npm-cli.js with
+// the current Node binary avoids shell:true and the bare "npm" command. On
+// Windows without npm_execpath, spawning npm.cmd directly fails with EINVAL
+// (BatBadBut), so use the npm-cli.js inside the Node installation instead and
+// keep shell:true only as a last resort.
+let command: string;
+let args: string[];
+let shell = false;
+
+if (process.env.npm_execpath) {
+  command = process.execPath;
+  args = [process.env.npm_execpath, ...installArgs];
+} else if (platform === "win32") {
+  const npmCli = join(
+    dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js"
+  );
+  if (existsSync(npmCli)) {
+    command = process.execPath;
+    args = [npmCli, ...installArgs];
+  } else {
+    command = "npm.cmd";
+    args = installArgs;
+    shell = true;
+  }
+} else {
+  command = "npm";
+  args = installArgs;
+}
+
+let result: ReturnType<typeof spawnSync>;
+try {
+  result = spawnSync(command, args, { stdio: "inherit", shell });
+} catch (err) {
+  console.error(
+    `Failed to launch ${command}: ${
+      err instanceof Error ? err.message : String(err)
+    }`
+  );
+  process.exit(1);
+}
+
+if (result.error) {
+  console.error(`Failed to launch ${command}: ${result.error.message}`);
+}
 if (result.status !== 0) {
   console.error(`Failed to install platform binary package: ${pkg}@${version}`);
   process.exit(1);

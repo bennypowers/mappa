@@ -357,7 +357,9 @@ func parseResolveOptions(args []js.Value) (resolveOptions, error) {
 }
 
 func jsStringArray(name string, v js.Value) ([]string, error) {
-	if v.Type() != js.TypeObject {
+	// TypeObject alone also matches plain objects and Sets, which have no
+	// length or indexed elements and would silently become empty arrays.
+	if !js.Global().Get("Array").Call("isArray", v).Bool() {
 		return nil, &jsError{message: name + " must be an array of strings"}
 	}
 	length := v.Length()
