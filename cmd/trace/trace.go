@@ -21,6 +21,7 @@ package trace
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -154,7 +155,7 @@ func run(cmd *cobra.Command, args []string) error {
 func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Options) error {
 	// Handle specifiers format separately
 	if format == "specifiers" {
-		result, issues, err := trace.TraceSpecifiers(osfs, file, absRoot)
+		result, issues, err := trace.TraceSpecifiers(osfs, file, absRoot, opts)
 		if err != nil {
 			return fmt.Errorf("failed to trace: %w", err)
 		}
@@ -163,6 +164,12 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 		for _, issue := range issues {
 			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", issue.File, issue.Line)
 			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
+		}
+		for _, graphErr := range result.Errors {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", graphErr)
+		}
+		if fatal, _ := trace.ClassifyGraphErrors(result.Errors); len(fatal) > 0 {
+			return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
 		}
 
 		out, err := json.MarshalIndent(result, "", "  ")
@@ -190,6 +197,12 @@ func runSingle(osfs fs.FileSystem, file, absRoot, format string, opts trace.Opti
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", graphErr)
 	}
 
+	// Read/parse failures make the import map incomplete. Report them as
+	// failures instead of emitting a partial map with a success exit code.
+	if fatal, _ := trace.ClassifyGraphErrors(result.Errors); len(fatal) > 0 {
+		return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
+	}
+
 	return output.ImportMap(osfs, result.ImportMap, format)
 }
 
@@ -204,10 +217,8 @@ func runBatch(osfs fs.FileSystem, files []string, absRoot, format string, opts t
 
 	// Collect results so output is deterministic and -o/--output is honored.
 	var collected []trace.BatchResult
-	var allWarnings []trace.Warning
 	for result := range results {
 		collected = append(collected, result)
-		allWarnings = append(allWarnings, result.Warnings...)
 	}
 	sort.Slice(collected, func(i, j int) bool { return collected[i].File < collected[j].File })
 
@@ -235,12 +246,13 @@ func runBatch(osfs fs.FileSystem, files []string, absRoot, format string, opts t
 		}
 	}
 
-	// Output warnings and non-fatal graph errors serially to stderr
-	for _, w := range allWarnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
-		fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
-	}
+	// Output warnings and non-fatal graph errors serially to stderr in the
+	// same sorted order as stdout.
 	for _, result := range collected {
+		for _, w := range result.Warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s:%d\n", w.File, w.Line)
+			fmt.Fprintf(os.Stderr, "  Import %q references %s %q\n", w.Specifier, w.IssueType, w.Package)
+		}
 		for _, graphErr := range result.GraphErrors {
 			fmt.Fprintf(os.Stderr, "Warning: %s: %s\n", result.File, graphErr)
 		}

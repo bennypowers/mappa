@@ -17,6 +17,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package trace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,83 @@ import (
 	"bennypowers.dev/mappa/resolve"
 )
 
+// ModuleTraceError reports a module that could not be traced because it could
+// not be read or parsed, or because it lives outside the allowed roots. These
+// errors make a generated import map incomplete, so callers treat them as
+// fatal. Resolution failures (for example an export not listed in
+// package.json) are recorded as plain errors and remain non-fatal warnings.
+type ModuleTraceError struct {
+	// Path is the module path that failed.
+	Path string
+	// Err is the underlying failure.
+	Err error
+}
+
+// Error keeps the historical "tracing <path>: <cause>" wording.
+func (e *ModuleTraceError) Error() string {
+	return fmt.Sprintf("tracing %s: %v", e.Path, e.Err)
+}
+
+// Unwrap returns the underlying error.
+func (e *ModuleTraceError) Unwrap() error { return e.Err }
+
+// relativize rewrites paths that live under root to be relative to it.
+// It is a no-op for paths outside root.
+func (e *ModuleTraceError) relativize(root string) error {
+	rel := relativizePath(root, e.Path)
+	inner := e.Err
+	if inner != nil && root != "" {
+		// Underlying filesystem errors often embed the absolute path too.
+		text := strings.ReplaceAll(inner.Error(), root+string(filepath.Separator), "")
+		inner = errors.New(text)
+	}
+	return &ModuleTraceError{Path: rel, Err: inner}
+}
+
+// ClassifyGraphErrors splits graph errors into fatal module tracing failures
+// and non-fatal resolution warnings.
+func ClassifyGraphErrors(errs []error) (fatal, nonFatal []error) {
+	for _, err := range errs {
+		var moduleErr *ModuleTraceError
+		if errors.As(err, &moduleErr) {
+			fatal = append(fatal, err)
+			continue
+		}
+		nonFatal = append(nonFatal, err)
+	}
+	return fatal, nonFatal
+}
+
+// RelativizeGraphErrors rewrites absolute paths under root to relative paths
+// in error text so CLI output stays portable. Fatal errors keep their type.
+func RelativizeGraphErrors(errs []error, root string) []error {
+	if root == "" {
+		return errs
+	}
+	out := make([]error, len(errs))
+	for i, err := range errs {
+		var moduleErr *ModuleTraceError
+		if errors.As(err, &moduleErr) {
+			out[i] = moduleErr.relativize(root)
+			continue
+		}
+		out[i] = errors.New(strings.ReplaceAll(err.Error(), root+string(filepath.Separator), ""))
+	}
+	return out
+}
+
+// relativizePath returns p relative to root when p is inside root.
+func relativizePath(root, p string) string {
+	if root == "" {
+		return p
+	}
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	return rel
+}
+
 // ModuleGraph represents the complete module dependency graph.
 type ModuleGraph struct {
 	// Entrypoints are the starting modules (from HTML scripts or explicit entry)
@@ -38,7 +116,9 @@ type ModuleGraph struct {
 	// Modules maps module paths to their parsed information
 	Modules map[string]*Module
 
-	// Errors collects non-fatal errors encountered during tracing
+	// Errors collects errors encountered during tracing. ModuleTraceError
+	// values are fatal (the map is incomplete); other errors are non-fatal
+	// resolution warnings.
 	Errors []error
 
 	// bareSpecifiers collects all bare import specifiers (need to be resolved)
@@ -62,6 +142,9 @@ type Tracer struct {
 	selfPkg         *packagejson.PackageJSON // Current package for self-referencing imports
 	selfPkgPath     string                   // Path to current package root
 	conditions      []string                 // Export condition priority
+	// allowedPaths are additional roots that may be traced, such as
+	// discovered workspace package directories.
+	allowedPaths []string
 
 	// pkgCache caches parsed package.json files by path (thread-safe).
 	// It can be shared with a resolver so each manifest is parsed once.
@@ -85,6 +168,7 @@ func NewTracer(fs fs.FileSystem, rootDir string) *Tracer {
 func (t *Tracer) clone() *Tracer {
 	c := *t
 	c.conditions = slices.Clone(t.conditions)
+	c.allowedPaths = slices.Clone(t.allowedPaths)
 	return &c
 }
 
@@ -118,6 +202,14 @@ func (t *Tracer) WithNodeModules(nodeModulesPath string) *Tracer {
 	return c
 }
 
+// WithAllowedPaths returns a new Tracer that may also trace modules under the
+// given roots. NewSetup uses it for discovered workspace package directories.
+func (t *Tracer) WithAllowedPaths(paths []string) *Tracer {
+	c := t.clone()
+	c.allowedPaths = slices.Clone(paths)
+	return c
+}
+
 // WithSelfPackage returns a new Tracer that recognizes imports of the given package
 // as self-references and resolves them locally. This is used when tracing a package
 // that imports itself (e.g., @rhds/elements importing @rhds/elements/rh-button/rh-button.js).
@@ -130,9 +222,15 @@ func (t *Tracer) WithSelfPackage(pkg *packagejson.PackageJSON, pkgPath string) *
 
 // TraceHTML parses an HTML file and traces all module scripts.
 func (t *Tracer) TraceHTML(htmlPath string) (*ModuleGraph, error) {
+	if info, err := t.fs.Stat(htmlPath); err == nil && info.Size() > maxHTMLSize {
+		return nil, fmt.Errorf("HTML file %s exceeds maximum size (%d bytes)", htmlPath, maxHTMLSize)
+	}
 	content, err := t.fs.ReadFile(htmlPath)
 	if err != nil {
 		return nil, err
+	}
+	if len(content) > maxHTMLSize {
+		return nil, fmt.Errorf("HTML file %s exceeds maximum size (%d bytes)", htmlPath, maxHTMLSize)
 	}
 
 	scripts, err := ExtractScripts(content)
@@ -160,7 +258,7 @@ func (t *Tracer) TraceHTML(htmlPath string) (*ModuleGraph, error) {
 			modulePath := t.resolvePath(htmlDir, script.Src)
 			graph.Entrypoints = append(graph.Entrypoints, modulePath)
 			if err := t.traceModule(graph, modulePath); err != nil {
-				graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", modulePath, err))
+				graph.Errors = append(graph.Errors, &ModuleTraceError{Path: modulePath, Err: err})
 				continue
 			}
 		} else if script.Inline {
@@ -181,7 +279,7 @@ func (t *Tracer) TraceHTML(htmlPath string) (*ModuleGraph, error) {
 						}
 						if depPath != "" {
 							if err := t.traceModule(graph, depPath); err != nil {
-								graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", depPath, err))
+								graph.Errors = append(graph.Errors, &ModuleTraceError{Path: depPath, Err: err})
 								continue
 							}
 						}
@@ -190,7 +288,7 @@ func (t *Tracer) TraceHTML(htmlPath string) (*ModuleGraph, error) {
 					// Relative import from inline script
 					modulePath := t.resolvePath(htmlDir, imp)
 					if err := t.traceModule(graph, modulePath); err != nil {
-						graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", modulePath, err))
+						graph.Errors = append(graph.Errors, &ModuleTraceError{Path: modulePath, Err: err})
 						continue
 					}
 				}
@@ -219,6 +317,9 @@ func (t *Tracer) TraceModule(modulePath string) (*ModuleGraph, error) {
 // maxModuleSize caps the size of a module read during tracing.
 const maxModuleSize = 10 << 20 // 10 MiB
 
+// maxHTMLSize caps the size of an HTML document read during tracing.
+const maxHTMLSize = 10 << 20 // 10 MiB
+
 // traceModule recursively traces a module and its dependencies.
 func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 	// Already traced in this graph?
@@ -239,7 +340,7 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 	} else {
 		// Read and parse the module
 		if !t.allowPath(modulePath) {
-			return fmt.Errorf("refusing to read module outside project root: %s", modulePath)
+			return fmt.Errorf("refusing to read module outside allowed roots: %s", modulePath)
 		}
 		if info, err := t.fs.Stat(modulePath); err == nil && info.Size() > maxModuleSize {
 			return fmt.Errorf("module %s exceeds maximum size (%d bytes)", modulePath, maxModuleSize)
@@ -247,6 +348,9 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 		content, err := t.fs.ReadFile(modulePath)
 		if err != nil {
 			return err
+		}
+		if len(content) > maxModuleSize {
+			return fmt.Errorf("module %s exceeds maximum size (%d bytes)", modulePath, maxModuleSize)
 		}
 
 		imports, err := ExtractImports(content)
@@ -285,7 +389,7 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 				}
 				if depPath != "" {
 					if err := t.traceModule(graph, depPath); err != nil {
-						graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", depPath, err))
+						graph.Errors = append(graph.Errors, &ModuleTraceError{Path: depPath, Err: err})
 						continue
 					}
 				}
@@ -294,7 +398,7 @@ func (t *Tracer) traceModule(graph *ModuleGraph, modulePath string) error {
 			// Relative or absolute path - resolve and trace
 			depPath := t.resolvePath(moduleDir, imp.Specifier)
 			if err := t.traceModule(graph, depPath); err != nil {
-				graph.Errors = append(graph.Errors, fmt.Errorf("tracing %s: %w", depPath, err))
+				graph.Errors = append(graph.Errors, &ModuleTraceError{Path: depPath, Err: err})
 				continue
 			}
 		}
@@ -431,15 +535,47 @@ func containsPath(root, p string) bool {
 }
 
 // allowPath applies containment checks for module tracing. Paths must live
-// under the project root or the configured node_modules tree.
+// under the package root, the workspace node_modules tree, or a discovered
+// workspace package directory.
+//
+// Symlinks are not resolved: fs.FileSystem exposes no Lstat/Readlink
+// operation, so a symlink planted inside an allowed root could point outside
+// it and this check would not notice. Callers that need that guarantee must
+// supply a filesystem whose Stat already resolves links to the real path or
+// reject escaping links before tracing.
+// allowPath reports whether p is inside the tracer's allowed roots. When the
+// FileSystem implements fs.SymlinkResolver, both p and the roots are resolved
+// first so a link cannot escape. Resolution happens before the read; a path
+// swapped for a symlink after this check is still subject to that race.
 func (t *Tracer) allowPath(p string) bool {
-	if containsPath(t.rootDir, p) {
-		return true
+	resolved := resolveSymlinks(t.fs, p)
+	roots := make([]string, 0, len(t.allowedPaths)+2)
+	roots = append(roots, t.rootDir)
+	if t.nodeModulesPath != "" {
+		roots = append(roots, t.nodeModulesPath)
 	}
-	if t.nodeModulesPath != "" && containsPath(filepath.Dir(t.nodeModulesPath), p) {
-		return true
+	roots = append(roots, t.allowedPaths...)
+	for _, root := range roots {
+		if containsPath(resolveSymlinks(t.fs, root), resolved) {
+			return true
+		}
 	}
 	return false
+}
+
+// resolveSymlinks resolves p when the FileSystem supports it. File systems
+// without SymlinkResolver, and paths that cannot be resolved (for example
+// because they do not exist yet), fall back to the lexical path.
+func resolveSymlinks(fsys fs.FileSystem, p string) string {
+	resolver, ok := fsys.(fs.SymlinkResolver)
+	if !ok {
+		return p
+	}
+	resolved, err := resolver.EvalSymlinks(p)
+	if err != nil {
+		return p
+	}
+	return resolved
 }
 
 // isURLSpecifier reports whether the specifier has a URL scheme (e.g. node:, data:, https:).

@@ -21,6 +21,7 @@ package fs
 import (
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // FileSystem provides an abstraction over filesystem operations.
@@ -45,8 +46,18 @@ type FileSystem interface {
 	Open(name string) (fs.File, error)
 }
 
+// SymlinkResolver is an optional capability for file systems that can resolve
+// symbolic links. Callers that enforce containment should use it when
+// available so a link cannot point outside an allowed root; file systems that
+// do not implement it keep working with lexical containment.
+type SymlinkResolver interface {
+	EvalSymlinks(path string) (string, error)
+}
+
 // OSFileSystem implements FileSystem using the standard os package.
 type OSFileSystem struct{}
+
+var _ SymlinkResolver = (*OSFileSystem)(nil)
 
 // NewOSFileSystem creates a new filesystem that uses the standard os package.
 func NewOSFileSystem() *OSFileSystem {
@@ -97,4 +108,9 @@ func (f *OSFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
 // Open opens the named file for reading.
 func (f *OSFileSystem) Open(name string) (fs.File, error) {
 	return os.Open(name)
+}
+
+// EvalSymlinks returns the path name after evaluating any symbolic links.
+func (f *OSFileSystem) EvalSymlinks(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
 }

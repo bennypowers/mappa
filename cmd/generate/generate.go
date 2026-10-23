@@ -68,7 +68,7 @@ func init() {
 	Cmd.Flags().String("template", "", "URL template (default: /node_modules/{package}/{path})")
 	Cmd.Flags().StringSlice("conditions", nil, "Export condition priority (e.g., production,browser,import,default)")
 	Cmd.Flags().IntP("optimize", "O", 1, "Optimization level: 0=none, 1=simplify+dedup (default)")
-	Cmd.Flags().Bool("strict", false, "Exit non-zero on import map validation warnings")
+	Cmd.Flags().Bool("strict", false, "Exit non-zero on import map validation or dependency resolution warnings")
 	Cmd.Flags().String("path-base", "", "Rebase workspace paths relative to this directory")
 	Cmd.Flags().String("package-deps", "", "Limit dependency resolution to this package's dependencies")
 

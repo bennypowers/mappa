@@ -1,0 +1,7 @@
+{
+  "name": "scope-closure-wildcard",
+  "dependencies": {
+    "lit": "^1.0.0",
+    "unrelated": "^1.0.0"
+  }
+}

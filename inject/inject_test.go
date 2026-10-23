@@ -355,3 +355,113 @@ func TestInjectFiltersUnrelatedScopes(t *testing.T) {
 		t.Errorf("injected map lost transitive scope:\n%s", html)
 	}
 }
+
+// TestInjectFailsOnUnreadableModule ensures a fatal graph error becomes a
+// failed Result instead of a partial map with a success claim.
+func TestInjectFailsOnUnreadableModule(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/missing-module", "/test")
+	before, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture: %v", err)
+	}
+
+	var results []Result
+	for result := range InjectBatch(mfs, []string{"/test/index.html"}, "/test", Options{}) {
+		results = append(results, result)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Error == "" {
+		t.Fatal("expected an error for an unreadable module")
+	}
+	if results[0].Modified {
+		t.Error("a failed trace must not report the file as modified")
+	}
+
+	after, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read fixture after inject: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("file changed despite a failed trace:\n%s", after)
+	}
+	if strings.Contains(string(after), "importmap") {
+		t.Error("must not inject a partial import map")
+	}
+}
+
+// TestInjectHonorsConditions checks parity with the trace command for the
+// same fixture and options.
+func TestInjectHonorsConditions(t *testing.T) {
+	traceFS := testutil.NewFixtureFS(t, "trace/conditions", "/test")
+	injectFS := testutil.NewFixtureFS(t, "trace/conditions", "/test")
+	opts := Options{Conditions: []string{"browser"}}
+
+	traced, err := trace.TraceSingle(traceFS, "/test/index.html", "/test", trace.Options{Conditions: opts.Conditions})
+	if err != nil {
+		t.Fatalf("TraceSingle failed: %v", err)
+	}
+
+	for result := range InjectBatch(injectFS, []string{"/test/index.html"}, "/test", opts) {
+		if result.Error != "" {
+			t.Fatalf("unexpected inject error: %s", result.Error)
+		}
+		if !result.Modified {
+			t.Fatal("expected inject to write an import map")
+		}
+	}
+
+	content, err := injectFS.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read injected fixture: %v", err)
+	}
+	loc := trace.FindImportMapTag(content)
+	if !loc.Found {
+		t.Fatal("expected an injected import map")
+	}
+	injected, err := importmap.Parse(content[loc.ContentStart:loc.ContentEnd])
+	if err != nil {
+		t.Fatalf("failed to parse injected import map: %v", err)
+	}
+
+	if got := injected.Imports["cond-pkg"]; got != "/node_modules/cond-pkg/browser.js" {
+		t.Errorf("inject condition resolution = %q, want browser.js (%v)", got, injected.Imports)
+	}
+	if got, want := injected.Imports["cond-pkg"], traced.ImportMap.Imports["cond-pkg"]; got != want {
+		t.Errorf("inject/trace condition mismatch: inject %q, trace %q", got, want)
+	}
+}
+
+// TestInjectBatchMemoizedResultsAreSafe runs two pages with identical
+// specifier sets through the batch memo and checks both receive the same map.
+func TestInjectBatchMemoizedResultsAreSafe(t *testing.T) {
+	mfs := testutil.NewFixtureFS(t, "trace/scope-closure", "/test")
+	var results []Result
+	for result := range InjectBatch(mfs, []string{"/test/index.html", "/test/other.html"}, "/test", Options{Parallel: 1}) {
+		results = append(results, result)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	for _, result := range results {
+		if result.Error != "" {
+			t.Fatalf("unexpected error for %s: %s", result.File, result.Error)
+		}
+		if !result.Modified {
+			t.Errorf("expected %s to be modified", result.File)
+		}
+	}
+
+	index, err := mfs.ReadFile("/test/index.html")
+	if err != nil {
+		t.Fatalf("Failed to read index.html: %v", err)
+	}
+	other, err := mfs.ReadFile("/test/other.html")
+	if err != nil {
+		t.Fatalf("Failed to read other.html: %v", err)
+	}
+	if string(index) != string(other) {
+		t.Errorf("memoized maps diverged between identical pages:\nindex:\n%s\nother:\n%s", index, other)
+	}
+}

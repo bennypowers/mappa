@@ -52,9 +52,18 @@ func ResolveForSpecifiers(base *local.Resolver, rootDir string, bareSpecs []stri
 	tracedImports := resolver.ResolveSpecifiers(rootDir, bareSpecs)
 	overlayGeneratedImports(tracedImports, generatedMap, bareSpecs)
 
+	// Re-add trailing-slash keys only for packages the page actually imports
+	// (or deep-imports). Copying every generated trailing-slash key would seed
+	// the scope closure with unrelated packages and leak their scopes.
 	for key, value := range generatedMap.Imports {
-		if strings.HasSuffix(key, "/") {
-			tracedImports[key] = value
+		if !strings.HasSuffix(key, "/") {
+			continue
+		}
+		for _, spec := range bareSpecs {
+			if spec == key || strings.HasPrefix(spec, key) {
+				tracedImports[key] = value
+				break
+			}
 		}
 	}
 

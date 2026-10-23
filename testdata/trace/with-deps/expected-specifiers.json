@@ -1,5 +1,5 @@
 {
-  "entrypoints": null,
+  "entrypoints": [],
   "modules": [
     "node_modules/lit/index.js"
   ],

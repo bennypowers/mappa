@@ -22,6 +22,7 @@ package trace
 
 import (
 	"errors"
+	"maps"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -57,8 +58,8 @@ type SingleResult struct {
 	Issues []ImportIssue
 	// SpecifiersResult is populated when format is "specifiers".
 	SpecifiersResult *SpecifiersResult
-	// Errors contains non-fatal tracing errors (for example, modules that
-	// could not be resolved or read) encountered while building the graph.
+	// Errors contains tracing errors encountered while building the graph.
+	// ModuleTraceError values are fatal; callers use ClassifyGraphErrors.
 	Errors []error
 }
 
@@ -69,6 +70,9 @@ type SpecifiersResult struct {
 	BareSpecifiers []string    `json:"bare_specifiers"`
 	Packages       []string    `json:"packages"`
 	Issues         []IssueJSON `json:"issues,omitempty"`
+	// Errors carries fatal graph errors for callers that need to fail the
+	// command. It is deliberately excluded from the JSON contract.
+	Errors []error `json:"-"`
 }
 
 // IssueJSON is the JSON representation of an ImportIssue.
@@ -101,17 +105,29 @@ type Warning struct {
 	Package   string `json:"package"`
 }
 
-// tracerSetup holds common tracing prerequisites.
-type tracerSetup struct {
-	workspaceRoot string
-	tracer        *Tracer
-	pkg           *packagejson.PackageJSON
-	pkgErr        error
-	pkgCache      packagejson.Cache
+// Setup bundles the tracing prerequisites shared by the trace and inject
+// commands for one package root.
+type Setup struct {
+	// WorkspaceRoot is the discovered workspace root for the package.
+	WorkspaceRoot string
+	// Tracer is configured with the shared package cache, node_modules
+	// traversal, conditions, and self-package awareness.
+	Tracer *Tracer
+	// Package is the parsed root package.json, or nil if it is missing or
+	// malformed.
+	Package *packagejson.PackageJSON
+	// PackageErr is the error from parsing the root package.json, if any.
+	PackageErr error
+	// PackageCache is shared by the tracer and every resolver so each
+	// manifest is parsed once.
+	PackageCache packagejson.Cache
 }
 
-// setupTracer creates common tracing prerequisites for a package root.
-func setupTracer(osfs fs.FileSystem, absRoot string, conditions []string, logger resolve.Logger) tracerSetup {
+// NewSetup discovers the workspace root, parses the root package.json, and
+// builds a tracer for absRoot. Parsing a missing or malformed package.json is
+// tolerated: Package/PackageErr report the outcome and callers decide whether
+// to warn, validate, or continue.
+func NewSetup(osfs fs.FileSystem, absRoot string, conditions []string, logger resolve.Logger) *Setup {
 	workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
 	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
 
@@ -119,30 +135,54 @@ func setupTracer(osfs fs.FileSystem, absRoot string, conditions []string, logger
 	pkg, pkgErr := packagejson.ParseFile(osfs, pkgPath)
 
 	pkgCache := packagejson.NewMemoryCache()
-	tracer := NewTracer(osfs, absRoot).WithPackageCache(pkgCache).WithLogger(logger).WithNodeModules(nodeModulesPath).WithConditions(conditions)
-	if pkgErr == nil && pkg.Name != "" {
+	tracer := NewTracer(osfs, absRoot).
+		WithPackageCache(pkgCache).
+		WithLogger(logger).
+		WithNodeModules(nodeModulesPath).
+		WithConditions(conditions)
+
+	// Workspace packages are legitimate trace roots even though they live
+	// outside the package root.
+	if discovered, err := resolve.DiscoverWorkspacePackages(osfs, workspaceRoot); err == nil && len(discovered) > 0 {
+		paths := make([]string, 0, len(discovered))
+		for _, workspacePkg := range discovered {
+			paths = append(paths, workspacePkg.Path)
+		}
+		tracer = tracer.WithAllowedPaths(paths)
+	}
+
+	if pkgErr == nil && pkg != nil && pkg.Name != "" {
 		tracer = tracer.WithSelfPackage(pkg, absRoot)
 	}
 
-	return tracerSetup{workspaceRoot, tracer, pkg, pkgErr, pkgCache}
+	return &Setup{
+		WorkspaceRoot: workspaceRoot,
+		Tracer:        tracer,
+		Package:       pkg,
+		PackageErr:    pkgErr,
+		PackageCache:  pkgCache,
+	}
 }
 
 // TraceSingle traces a single HTML file and generates an import map.
 func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*SingleResult, error) {
-	setup := setupTracer(osfs, absRoot, opts.Conditions, opts.Logger)
+	setup := NewSetup(osfs, absRoot, opts.Conditions, opts.Logger)
 
-	graph, err := setup.tracer.TraceHTML(htmlFile)
+	graph, err := setup.Tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return nil, err
 	}
 
 	// Validate imports against dependencies if package.json was parsed
 	var issues []ImportIssue
-	if setup.pkgErr == nil {
-		issues = graph.ValidateImports(osfs, absRoot, setup.pkg.Name, setup.pkg.Dependencies, setup.pkg.DevDependencies)
+	if setup.PackageErr == nil && setup.Package != nil {
+		issues = graph.ValidateImports(osfs, absRoot, setup.Package.Name, setup.Package.Dependencies, setup.Package.DevDependencies)
 	}
 
-	result := &SingleResult{Issues: issues, Errors: graph.Errors}
+	result := &SingleResult{
+		Issues: issues,
+		Errors: RelativizeGraphErrors(graph.Errors, setup.WorkspaceRoot),
+	}
 
 	// Get bare specifiers once for reuse
 	bareSpecs := graph.BareSpecifiers()
@@ -153,7 +193,7 @@ func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*S
 		templateArg = resolve.DefaultLocalTemplate
 	}
 
-	resolver := local.New(osfs, opts.Logger).WithPackageCache(setup.pkgCache)
+	resolver := local.New(osfs, opts.Logger).WithPackageCache(setup.PackageCache)
 	resolver, err = resolver.WithTemplate(templateArg)
 	if err != nil {
 		return nil, err
@@ -162,7 +202,7 @@ func TraceSingle(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*S
 		resolver = resolver.WithConditions(opts.Conditions)
 	}
 
-	result.ImportMap, err = ResolveForSpecifiers(resolver, setup.workspaceRoot, bareSpecs, setup.pkg)
+	result.ImportMap, err = ResolveForSpecifiers(resolver, setup.WorkspaceRoot, bareSpecs, setup.Package)
 	if err != nil {
 		return nil, err
 	}
@@ -185,37 +225,41 @@ func overlayGeneratedImports(traced map[string]string, generated *importmap.Impo
 }
 
 // TraceSpecifiers returns the legacy specifiers format for debugging.
-func TraceSpecifiers(osfs fs.FileSystem, htmlFile, absRoot string) (*SpecifiersResult, []ImportIssue, error) {
-	setup := setupTracer(osfs, absRoot, nil, nil)
+// opts supplies export conditions and the warning logger so the traced graph
+// matches the import-map format.
+func TraceSpecifiers(osfs fs.FileSystem, htmlFile, absRoot string, opts Options) (*SpecifiersResult, []ImportIssue, error) {
+	setup := NewSetup(osfs, absRoot, opts.Conditions, opts.Logger)
 
-	graph, err := setup.tracer.TraceHTML(htmlFile)
+	graph, err := setup.Tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Validate imports against dependencies if package.json was parsed
 	var issues []ImportIssue
-	if setup.pkgErr == nil {
-		issues = graph.ValidateImports(osfs, absRoot, setup.pkg.Name, setup.pkg.Dependencies, setup.pkg.DevDependencies)
+	if setup.PackageErr == nil && setup.Package != nil {
+		issues = graph.ValidateImports(osfs, absRoot, setup.Package.Name, setup.Package.Dependencies, setup.Package.DevDependencies)
 	}
 
 	// Convert absolute paths to relative for portable output
 	relativize := func(absPath string) string {
-		if rel, err := filepath.Rel(setup.workspaceRoot, absPath); err == nil {
+		if rel, err := filepath.Rel(setup.WorkspaceRoot, absPath); err == nil {
 			return rel
 		}
 		return absPath
 	}
 
-	var entrypoints []string
+	entrypoints := make([]string, 0, len(graph.Entrypoints))
 	for _, ep := range graph.Entrypoints {
 		entrypoints = append(entrypoints, relativize(ep))
 	}
 
 	result := &SpecifiersResult{
 		Entrypoints:    entrypoints,
+		Modules:        make([]string, 0, len(graph.Modules)),
 		BareSpecifiers: graph.BareSpecifiers(),
 		Packages:       graph.PackageNames(),
+		Errors:         RelativizeGraphErrors(graph.Errors, setup.WorkspaceRoot),
 	}
 
 	for p := range graph.Modules {
@@ -255,29 +299,23 @@ func TraceBatch(osfs fs.FileSystem, files []string, absRoot string, opts Options
 			templateArg = resolve.DefaultLocalTemplate
 		}
 
-		// Find workspace root once for all files
-		workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
-		nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
-
-		// Parse package.json once for self-referencing imports and dependency validation
-		pkgPath := filepath.Join(absRoot, "package.json")
-		pkg, _ := packagejson.ParseFile(osfs, pkgPath)
-
-		// One cache shared by the tracer and every per-file resolver.
-		pkgCache := packagejson.NewMemoryCache()
-
-		// Create shared tracer with self-package awareness and transitive dependency following
-		tracer := NewTracer(osfs, absRoot).WithPackageCache(pkgCache).WithLogger(opts.Logger).WithNodeModules(nodeModulesPath).WithConditions(opts.Conditions)
-		if pkg != nil && pkg.Name != "" {
-			tracer = tracer.WithSelfPackage(pkg, absRoot)
-		}
+		// Find the workspace root, parse package.json once for self-referencing
+		// imports and dependency validation, and build the shared tracer.
+		setup := NewSetup(osfs, absRoot, opts.Conditions, opts.Logger)
+		workspaceRoot := setup.WorkspaceRoot
+		tracer := setup.Tracer
+		pkg := setup.Package
 
 		// Create shared base resolver with template, conditions, and package cache
-		baseResolver := local.New(osfs, opts.Logger).WithPackageCache(pkgCache)
+		baseResolver := local.New(osfs, opts.Logger).WithPackageCache(setup.PackageCache)
 		baseResolver, err := baseResolver.WithTemplate(templateArg)
 		if err != nil {
 			for _, file := range files {
-				results <- BatchResult{File: file, Error: err.Error()}
+				results <- BatchResult{
+					File:    file,
+					Imports: make(map[string]string),
+					Error:   err.Error(),
+				}
 			}
 			return
 		}
@@ -325,19 +363,15 @@ func traceFileForBatch(tracer *Tracer, osfs fs.FileSystem, htmlFile, absRoot, wo
 		result.Error = err.Error()
 		return result
 	}
-	var tracingErrs []error
-	for _, graphErr := range graph.Errors {
-		// Read/parse failures make the map incomplete and are fatal. Export
-		// restriction failures are expected for deep imports and remain
-		// warnings; the resolvers emit exact fallback entries for those.
-		if strings.HasPrefix(graphErr.Error(), "tracing ") {
-			tracingErrs = append(tracingErrs, graphErr)
-			continue
-		}
-		result.GraphErrors = append(result.GraphErrors, graphErr.Error())
+	// Read/parse failures and containment failures make the map incomplete and
+	// are fatal. Export restriction failures are expected for deep imports and
+	// remain warnings; the resolvers emit exact fallback entries for those.
+	fatalErrs, nonFatalErrs := ClassifyGraphErrors(graph.Errors)
+	for _, graphErr := range nonFatalErrs {
+		result.GraphErrors = append(result.GraphErrors, RelativizeGraphErrors([]error{graphErr}, workspaceRoot)[0].Error())
 	}
-	if len(tracingErrs) > 0 {
-		result.Error = errors.Join(tracingErrs...).Error()
+	if len(fatalErrs) > 0 {
+		result.Error = errors.Join(RelativizeGraphErrors(fatalErrs, workspaceRoot)...).Error()
 		return result
 	}
 
@@ -377,8 +411,13 @@ func traceFileForBatch(tracer *Tracer, osfs fs.FileSystem, htmlFile, absRoot, wo
 		memo.Store(memoKey, resolved)
 	}
 
-	result.Imports = resolved.Imports
-	result.Scopes = resolved.Scopes
+	result.Imports = maps.Clone(resolved.Imports)
+	if len(resolved.Scopes) > 0 {
+		result.Scopes = make(map[string]map[string]string, len(resolved.Scopes))
+		for scope, entries := range resolved.Scopes {
+			result.Scopes[scope] = maps.Clone(entries)
+		}
+	}
 
 	return result
 }

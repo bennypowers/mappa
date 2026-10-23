@@ -22,6 +22,7 @@ package inject
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,29 +90,19 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 			templateArg = resolve.DefaultLocalTemplate
 		}
 
-		// Find workspace root once for all files
-		workspaceRoot := resolve.FindWorkspaceRoot(osfs, absRoot)
-		nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
-
-		// Parse package.json once
-		pkgPath := filepath.Join(absRoot, "package.json")
-		pkg, pkgErr := packagejson.ParseFile(osfs, pkgPath)
-		if pkgErr != nil && osfs.Exists(pkgPath) {
+		// Find workspace root, parse package.json, and build a shared tracer
+		// (conditions included) exactly as the trace command does.
+		setup := trace.NewSetup(osfs, absRoot, opts.Conditions, opts.Logger)
+		workspaceRoot := setup.WorkspaceRoot
+		pkg := setup.Package
+		if setup.PackageErr != nil && osfs.Exists(filepath.Join(absRoot, "package.json")) {
 			// File exists but is malformed - warn but continue
-			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", pkgPath, pkgErr)
+			fmt.Fprintf(os.Stderr, "Warning: failed to parse %s: %v\n", filepath.Join(absRoot, "package.json"), setup.PackageErr)
 		}
-
-		// One cache shared by the tracer and every per-file resolver.
-		pkgCache := packagejson.NewMemoryCache()
-
-		// Create shared tracer
-		tracer := trace.NewTracer(osfs, absRoot).WithPackageCache(pkgCache).WithLogger(opts.Logger).WithNodeModules(nodeModulesPath)
-		if pkg != nil && pkg.Name != "" {
-			tracer = tracer.WithSelfPackage(pkg, absRoot)
-		}
+		tracer := setup.Tracer
 
 		// Create shared base resolver
-		baseResolver := local.New(osfs, opts.Logger).WithPackageCache(pkgCache)
+		baseResolver := local.New(osfs, opts.Logger).WithPackageCache(setup.PackageCache)
 		baseResolver, err := baseResolver.WithTemplate(templateArg)
 		if err != nil {
 			for _, file := range files {
@@ -123,6 +114,10 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 			baseResolver = baseResolver.WithConditions(opts.Conditions)
 		}
 
+		// Memoize resolutions by the file's bare-specifier set. Many pages in
+		// a batch share the same dependency set.
+		memo := &sync.Map{} // map[string]*importmap.ImportMap
+
 		// Create jobs channel
 		jobs := make(chan string, len(files))
 
@@ -131,7 +126,7 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 		for range parallel {
 			wg.Go(func() {
 				for htmlFile := range jobs {
-					result := injectFile(osfs, tracer, htmlFile, workspaceRoot, baseResolver, pkg, opts.DryRun)
+					result := injectFile(osfs, tracer, htmlFile, workspaceRoot, baseResolver, pkg, opts, memo)
 					results <- result
 				}
 			})
@@ -150,7 +145,7 @@ func InjectBatch(osfs fs.FileSystem, files []string, absRoot string, opts Option
 }
 
 // injectFile processes a single HTML file and injects/updates its import map.
-func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, dryRun bool) Result {
+func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, opts Options, memo *sync.Map) Result {
 	result := Result{File: htmlFile}
 
 	// Read HTML content
@@ -161,7 +156,7 @@ func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoo
 	}
 
 	// Trace the file to get its import map
-	tracedMap, err := traceForInjection(tracer, htmlFile, workspaceRoot, baseResolver, pkg)
+	tracedMap, err := traceForInjection(tracer, htmlFile, workspaceRoot, baseResolver, pkg, opts.Logger, memo)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -217,7 +212,7 @@ func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoo
 	result.Inserted = inserted
 
 	// Write file if not dry-run
-	if !dryRun {
+	if !opts.DryRun {
 		if err := osfs.WriteFile(htmlFile, newContent, 0644); err != nil {
 			result.Error = err.Error()
 			return result
@@ -228,13 +223,39 @@ func injectFile(osfs fs.FileSystem, tracer *trace.Tracer, htmlFile, workspaceRoo
 }
 
 // traceForInjection traces an HTML file and returns its import map.
-func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON) (*importmap.ImportMap, error) {
+//
+// Fatal graph errors (unreadable or unparseable modules) are returned so the
+// caller records a failure instead of claiming a partial map succeeded.
+// Non-fatal resolution warnings are logged when logger is non-nil. The
+// returned map may be shared through memo and must be treated as read-only.
+func traceForInjection(tracer *trace.Tracer, htmlFile, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, logger resolve.Logger, memo *sync.Map) (*importmap.ImportMap, error) {
 	graph, err := tracer.TraceHTML(htmlFile)
 	if err != nil {
 		return nil, err
 	}
 
-	return trace.ResolveForSpecifiers(baseResolver, workspaceRoot, graph.BareSpecifiers(), pkg)
+	fatal, nonFatal := trace.ClassifyGraphErrors(graph.Errors)
+	for _, graphErr := range nonFatal {
+		if logger != nil {
+			logger.Warning("%v", graphErr)
+		}
+	}
+	if len(fatal) > 0 {
+		return nil, errors.Join(fatal...)
+	}
+
+	bareSpecs := graph.BareSpecifiers()
+	memoKey := strings.Join(bareSpecs, "\x00")
+	if cached, ok := memo.Load(memoKey); ok {
+		return cached.(*importmap.ImportMap), nil
+	}
+
+	resolved, err := trace.ResolveForSpecifiers(baseResolver, workspaceRoot, bareSpecs, pkg)
+	if err != nil {
+		return nil, err
+	}
+	memo.Store(memoKey, resolved)
+	return resolved, nil
 }
 
 // indentLines prefixes each non-empty line in s with the given indent.
