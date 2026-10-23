@@ -123,7 +123,7 @@ func TestCompareSemver(t *testing.T) {
 }
 
 func TestMatchVersion(t *testing.T) {
-	versions := []string{"1.0.0", "1.0.1", "1.1.0", "1.2.0", "2.0.0", "2.1.0", "3.0.0-alpha"}
+	versions := []string{"1.0.0", "1.0.1", "1.1.0", "1.2.0", "2.0.0", "2.1.0", "3.0.0-alpha", "not-a-version"}
 
 	tests := []struct {
 		name         string
@@ -151,6 +151,13 @@ func TestMatchVersion(t *testing.T) {
 		{"tilde minor", "~1.1", "1.1.0"},
 		{"hyphen range", "1.0.0 - 1.1.0", "1.1.0"},
 		{"or range", "^1.0.0 || ^2.0.0", "2.1.0"},
+		{"compound gte lt", ">=1.0.0 <2.0.0", "1.2.0"},
+		{"compound gt lt", ">1.0.0 <2.0.0", "1.2.0"},
+		{"compound gte lte", ">=1.0.0 <=1.1.0", "1.1.0"},
+		{"compound caret lt", "^1.0.0 <1.2.0", "1.1.0"},
+		{"compound unparseable version ignored", ">=1.0.0 <2.0.0", "1.2.0"},
+		{"caret x-range", "^1.x", "1.2.0"},
+		{"tilde x-range", "~1.x", "1.2.0"},
 	}
 
 	for _, tt := range tests {
@@ -213,6 +220,27 @@ func TestMatchCaretRange(t *testing.T) {
 			got := matchCaretRange(tt.versions, tt.base)
 			if got != tt.want {
 				t.Errorf("matchCaretRange(%v, %q) = %q, want %q", tt.versions, tt.base, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchVersionXRangesWithPrefix(t *testing.T) {
+	tests := []struct {
+		name         string
+		versions     []string
+		versionRange string
+		want         string
+	}{
+		{"caret 0.0.x", []string{"0.0.1", "0.0.5", "0.1.0"}, "^0.0.x", "0.0.5"},
+		{"caret 1.x", []string{"1.0.0", "1.4.0", "2.0.0"}, "^1.x", "1.4.0"},
+		{"tilde 1.x", []string{"1.0.0", "1.4.0", "2.0.0"}, "~1.x", "1.4.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchVersion(tt.versions, tt.versionRange); got != tt.want {
+				t.Errorf("matchVersion(%q) = %q, want %q", tt.versionRange, got, tt.want)
 			}
 		})
 	}
@@ -550,5 +578,97 @@ func TestResolveVersionSkipsRegistryForExact(t *testing.T) {
 	}
 	if fetcher.count.Load() != before {
 		t.Errorf("expected exact short circuit to avoid a fetch, got %d fetches", fetcher.count.Load())
+	}
+}
+
+// saturatingFetcher blocks every request until release and records how many
+// times each URL was fetched.
+type saturatingFetcher struct {
+	base    Fetcher
+	release chan struct{}
+	started chan struct{}
+	mu      sync.Mutex
+	counts  map[string]int
+}
+
+func newSaturatingFetcher(base Fetcher, started int) *saturatingFetcher {
+	return &saturatingFetcher{
+		base:    base,
+		release: make(chan struct{}),
+		started: make(chan struct{}, started),
+		counts:  make(map[string]int),
+	}
+}
+
+func (f *saturatingFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	f.mu.Lock()
+	f.counts[url]++
+	f.mu.Unlock()
+	f.started <- struct{}{}
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return f.base.Fetch(ctx, url)
+}
+
+func (f *saturatingFetcher) count(url string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.counts[url]
+}
+
+func TestResolveVersionSaturationNoDeadlock(t *testing.T) {
+	const packages = maxInflightPackuments + 1
+
+	mock := NewMockFetcher()
+	for i := range packages {
+		url := fmt.Sprintf("https://registry.npmjs.org/pkg-%d", i)
+		mock.AddResponse(url, []byte(fmt.Sprintf(
+			`{"name":"pkg-%d","dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"version":"1.0.0"}}}`,
+			i,
+		)))
+	}
+
+	fetcher := newSaturatingFetcher(mock, packages)
+	registry := NewRegistry(fetcher)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, packages)
+	for i := range packages {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			version, err := registry.ResolveVersion(context.Background(), fmt.Sprintf("pkg-%d", i), "^1.0.0")
+			if err != nil {
+				errs <- err
+				return
+			}
+			if version != "1.0.0" {
+				errs <- fmt.Errorf("pkg-%d resolved to %q", i, version)
+			}
+		}(i)
+	}
+
+	for range packages {
+		select {
+		case <-fetcher.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for packument fetches; possible deadlock")
+		}
+	}
+	close(fetcher.release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("ResolveVersion error: %v", err)
+	}
+
+	for i := range packages {
+		url := fmt.Sprintf("https://registry.npmjs.org/pkg-%d", i)
+		if got := fetcher.count(url); got != 1 {
+			t.Errorf("%s fetched %d times, want 1", url, got)
+		}
 	}
 }
