@@ -79,11 +79,24 @@ func (c *PackageCache) Set(pkgName, version string, pkg *packagejson.PackageJSON
 // GetOrLoad retrieves a cached package.json or loads it using the provided loader.
 // The loader runs at most once per successful load, even with concurrent access.
 // Failed loads are evicted from the cache, so a subsequent call retries.
+//
+// When a waiter observes a load that failed because the leader's context was
+// canceled or expired, it retries under its own loader and context. Without
+// this, one caller's cancellation would poison every request coalesced behind
+// it, even though those callers are still live. Retries are bounded.
 func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packagejson.PackageJSON, error)) (*packagejson.PackageJSON, error) {
+	return c.getOrLoad(pkgName, version, loader, 2)
+}
+
+func (c *PackageCache) getOrLoad(pkgName, version string, loader func() (*packagejson.PackageJSON, error), retries int) (*packagejson.PackageJSON, error) {
 	key := cacheKey(pkgName, version)
 
 	if entry, ok := c.lru.get(key); ok {
 		entry.load()
+		if entry.err != nil && retries > 0 && isContextError(entry.err) {
+			c.lru.deleteIf(key, func(current *cacheEntry) bool { return current == entry })
+			return c.getOrLoad(pkgName, version, loader, retries-1)
+		}
 		return entry.pkg, entry.err
 	}
 
@@ -91,6 +104,10 @@ func (c *PackageCache) GetOrLoad(pkgName, version string, loader func() (*packag
 	existing, exists := c.lru.getOrInsert(key, entry)
 	if exists {
 		existing.load()
+		if existing.err != nil && retries > 0 && isContextError(existing.err) {
+			c.lru.deleteIf(key, func(current *cacheEntry) bool { return current == existing })
+			return c.getOrLoad(pkgName, version, loader, retries-1)
+		}
 		return existing.pkg, existing.err
 	}
 

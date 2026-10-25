@@ -19,6 +19,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package output
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -27,6 +28,7 @@ import (
 
 	"bennypowers.dev/mappa/fs"
 	"bennypowers.dev/mappa/importmap"
+	"bennypowers.dev/mappa/trace"
 )
 
 // WarningLogger writes warnings to a writer and retains them for inspection.
@@ -62,6 +64,45 @@ func (l *WarningLogger) Warnings() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.warnings...)
+}
+
+// PrintIssues writes import validation issues as warnings.
+func PrintIssues(w io.Writer, issues []trace.ImportIssue) {
+	for _, issue := range issues {
+		_, _ = fmt.Fprintf(w, "Warning: %s:%d\n", issue.File, issue.Line)
+		_, _ = fmt.Fprintf(w, "  Import %q references %s %q\n", issue.Specifier, issue.IssueType, issue.Package)
+	}
+}
+
+// PrintGraphErrors writes every graph error as a warning.
+func PrintGraphErrors(w io.Writer, errs []error) {
+	for _, graphErr := range errs {
+		_, _ = fmt.Fprintf(w, "Warning: %v\n", graphErr)
+	}
+}
+
+// FatalGraphError returns a joined error when errs contains fatal module
+// tracing failures, or nil otherwise.
+func FatalGraphError(errs []error) error {
+	fatal, _ := trace.ClassifyGraphErrors(errs)
+	if len(fatal) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d module(s) could not be traced: %w", len(fatal), errors.Join(fatal...))
+}
+
+// PrintBatchWarnings writes validation warnings and non-fatal graph errors for
+// batch results in their collected order.
+func PrintBatchWarnings(w io.Writer, results []trace.BatchResult) {
+	for _, result := range results {
+		for _, warning := range result.Warnings {
+			_, _ = fmt.Fprintf(w, "Warning: %s:%d\n", warning.File, warning.Line)
+			_, _ = fmt.Fprintf(w, "  Import %q references %s %q\n", warning.Specifier, warning.IssueType, warning.Package)
+		}
+		for _, graphErr := range result.GraphErrors {
+			_, _ = fmt.Fprintf(w, "Warning: %s: %s\n", result.File, graphErr)
+		}
+	}
 }
 
 // ImportMap formats and outputs an import map to stdout or a file.

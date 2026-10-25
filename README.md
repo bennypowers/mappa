@@ -149,12 +149,15 @@ mappa trace index.html --format specifiers
 In batch mode (more than one file), each NDJSON line is a result envelope:
 
 ```json
-{"file":"pages/index.html","imports":{"lit":"/node_modules/lit/index.js"},"scopes":{...},"errors":["..."]}
+{"file":"pages/index.html","imports":{"lit":"/node_modules/lit/index.js"},"scopes":{...},"warnings":["..."]}
 ```
 
 Results are sorted by file name and `--format` only accepts `json`. A file-level
 failure sets the process exit code to 1 while still emitting a line for every
-file.
+file. A failed file still carries `"imports": {}`, never `null`.
+
+`--format specifiers` prints a JSON array of the discovered specifiers, and
+prints `[]` when a file contains none.
 
 **How it works:**
 
@@ -162,6 +165,15 @@ file.
 2. Uses tree-sitter to extract all `import` statements from JS modules
 3. Follows transitive dependencies through local and node_modules files
 4. Generates an import map with only the bare specifiers actually imported
+
+**Size and path limits:**
+
+Modules and HTML documents are each capped at 10 MiB. Reads are confined to
+the package root, `node_modules`, and discovered workspace package
+directories; a symlink that escapes those roots is refused. Oversized inputs
+report `module <path> exceeds maximum size (10485760 bytes)` or
+`HTML file <path> exceeds maximum size (10485760 bytes)`, and escaped reads
+report `refusing to read module outside allowed roots: <path>`.
 
 **Static Analysis Limitations:**
 
@@ -199,7 +211,8 @@ Flags:
 ```
 
 The exit code is 0 only when every matched file was processed successfully.
-If the generated map is empty, the file is left unchanged.
+If the generated map is empty, the file is left unchanged. A `--glob` pattern
+that matches no files exits 1.
 
 ### `mappa validate`
 
@@ -339,6 +352,19 @@ const importMap = await generate(
 | `template` | `string` | Custom CDN URL template |
 | `conditions` | `string[]` | Export conditions |
 | `exclude` | `string[]` | Packages to exclude, including transitively |
+| `timeoutMs` | `number` | Per-request timeout in milliseconds (default: `30000`; `0` disables) |
+| `allowPartial` | `boolean` | Return the partial map with `warnings` instead of rejecting (default: `false`) |
+
+By default `generate()` rejects when a dependency cannot be resolved. Set
+`allowPartial: true` to receive the resolvable entries plus a `warnings` array:
+
+```typescript
+const map = await generate(
+  { dependencies: { lit: '^3.0.0', missing: '^1.0.0' } },
+  { allowPartial: true }
+);
+// map.warnings: ["missing@^1.0.0: ..."]
+```
 
 An unknown `cdn` value rejects the promise with an error listing the supported
 provider names.

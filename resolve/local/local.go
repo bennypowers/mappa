@@ -31,10 +31,6 @@ import (
 	"bennypowers.dev/mappa/resolve"
 )
 
-// maxDependencyEntries caps the number of dependencies accepted from a single
-// package.json, preventing unbounded goroutine fan-out from untrusted manifests.
-const maxDependencyEntries = 10000
-
 // Resolver generates import maps pointing to local node_modules paths.
 type Resolver struct {
 	fs                 fs.FileSystem
@@ -207,9 +203,9 @@ func (r *Resolver) parsePackageJSON(path string) (*packagejson.PackageJSON, erro
 }
 
 // Resolve generates an ImportMap for a project rooted at the given directory.
-// A manifest or workspace declaring more than maxDependencyEntries direct
-// dependencies is rejected with an error; transitive packages exceeding the
-// same cap have their scope skipped with a warning.
+// A manifest or workspace declaring more than resolve.MaxDependencyEntries
+// direct dependencies is rejected with an error; transitive packages exceeding
+// the same cap have their scope skipped with a warning.
 func (r *Resolver) Resolve(rootDir string) (*importmap.ImportMap, error) {
 	im, _, err := r.resolveInternal(rootDir, nil)
 	return im, err
@@ -263,7 +259,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 					subpath = "." + subpath
 				}
 				resolved, err := rootPkg.ResolveExport(subpath, opts)
-				if err != nil || !isWithinDir(rootDir, filepath.Join(rootDir, resolved)) {
+				if err != nil || !withinPackage(rootDir, resolved) {
 					continue
 				}
 				result[spec] = "/" + resolved
@@ -294,7 +290,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 		// Add trailing-slash keys from ImportMapEntries
 		trailingSlashPrefixes := make(map[string]bool)
 		for _, e := range pkg.ImportMapEntries(opts) {
-			if strings.HasSuffix(e.Key, "/") {
+			if strings.HasSuffix(e.Key, "/") && withinPackage(pkgPath, e.Path) {
 				importKey := pkgName + e.Key
 				result[importKey] = r.template.Expand(pkgName, "", e.Path)
 				trailingSlashPrefixes[importKey] = true
@@ -328,7 +324,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 			// Resolve the specifier
 			var resolvedPath string
 			resolved, resolveErr := pkg.ResolveExport(subpath, opts)
-			if resolveErr == nil && isWithinDir(pkgPath, filepath.Join(pkgPath, resolved)) {
+			if resolveErr == nil && withinPackage(pkgPath, resolved) {
 				resolvedPath = resolved
 			}
 
@@ -341,7 +337,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 				}
 			}
 
-			if !isWithinDir(pkgPath, filepath.Join(pkgPath, resolvedPath)) {
+			if !withinPackage(pkgPath, resolvedPath) {
 				continue
 			}
 
@@ -355,8 +351,8 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 // ResolveWithGraph generates an ImportMap and builds a DependencyGraph.
 // Use this for the initial resolution when you plan to do incremental updates.
 // The same dependency cap as Resolve applies: top-level declarations above
-// maxDependencyEntries return an error, while oversized transitive packages
-// are skipped with a warning.
+// resolve.MaxDependencyEntries return an error, while oversized transitive
+// packages are skipped with a warning.
 func (r *Resolver) ResolveWithGraph(rootDir string) (*resolve.IncrementalResult, error) {
 	graph := resolve.NewDependencyGraph()
 	im, graph, err := r.resolveInternal(rootDir, graph)
@@ -419,7 +415,7 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	// Add root package's own exports if requested
 	// This is useful for dev servers where you want to import the package by name
 	if r.includeRootExports && rootPkg.Name != "" {
-		if err := r.addRootPackageExports(result, rootPkg); err != nil {
+		if err := r.addRootPackageExports(result, rootPkg, rootDir); err != nil {
 			if r.logger != nil {
 				r.logger.Warning("Failed to add root package exports: %v", err)
 			}
@@ -429,8 +425,8 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	// Collect all packages to process: dependencies + additional packages
 	packagesToProcess, _ := r.directDependencyNames(rootDir, nil)
 
-	if len(packagesToProcess) > maxDependencyEntries {
-		return nil, graph, fmt.Errorf("package.json declares %d dependencies (maximum %d)", len(packagesToProcess), maxDependencyEntries)
+	if len(packagesToProcess) > resolve.MaxDependencyEntries {
+		return nil, graph, resolve.DependencyCapError("package.json", len(packagesToProcess))
 	}
 
 	// Add direct dependencies to imports (parallel)
@@ -463,8 +459,10 @@ func (r *Resolver) resolveInternal(rootDir string, graph *resolve.DependencyGrap
 	}
 	wg.Wait()
 
-	// Add scopes for transitive dependencies
-	if err := r.addTransitiveDependenciesWithGraph(result, workspaceRoot, graph); err != nil {
+	// Add scopes for transitive dependencies. Dependency selection uses the
+	// package root (rootDir), while hoisted modules and web paths use the
+	// workspace root.
+	if err := r.addTransitiveDependenciesWithGraph(result, workspaceRoot, rootDir, graph); err != nil {
 		if r.logger != nil {
 			r.logger.Warning("Failed to add transitive dependencies: %v", err)
 		}
@@ -515,8 +513,8 @@ func (r *Resolver) resolveWorkspaceInternal(rootDir string, graph *resolve.Depen
 		return nil, graph, err
 	}
 
-	if len(allDeps) > maxDependencyEntries {
-		return nil, graph, fmt.Errorf("workspace declares %d dependencies (maximum %d)", len(allDeps), maxDependencyEntries)
+	if len(allDeps) > resolve.MaxDependencyEntries {
+		return nil, graph, resolve.DependencyCapError("workspace", len(allDeps))
 	}
 
 	// 3. Add node_modules dependencies (parallel)
@@ -590,6 +588,9 @@ func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg r
 
 	opts := r.resolveOpts()
 	for _, e := range pkgJSON.ImportMapEntries(opts) {
+		if !withinPackage(pkg.Path, e.Path) {
+			continue
+		}
 		im.Imports[pkg.Name+e.Key] = webPath + "/" + e.Path
 	}
 
@@ -598,9 +599,12 @@ func (r *Resolver) addWorkspacePackageToImportMap(im *importmap.ImportMap, pkg r
 
 // addRootPackageExports adds the root package's own exports to the import map.
 // This allows importing the package by name in development (e.g., import { x } from 'my-lib').
-func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejson.PackageJSON) error {
+func (r *Resolver) addRootPackageExports(im *importmap.ImportMap, pkg *packagejson.PackageJSON, pkgPath string) error {
 	opts := r.resolveOpts()
 	for _, e := range pkg.ImportMapEntries(opts) {
+		if !withinPackage(pkgPath, e.Path) {
+			continue
+		}
 		im.Imports[pkg.Name+e.Key] = "/" + e.Path
 	}
 	return nil
@@ -625,6 +629,9 @@ func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *s
 	opts := r.resolveOpts()
 
 	for _, e := range pkg.ImportMapEntries(opts) {
+		if !withinPackage(pkgPath, e.Path) {
+			continue
+		}
 		imports[pkgName+e.Key] = r.template.Expand(pkgName, "", e.Path)
 	}
 
@@ -644,9 +651,11 @@ func (r *Resolver) addPackageToImportMapWithGraph(im *importmap.ImportMap, mu *s
 }
 
 // addTransitiveDependenciesWithGraph adds scopes for packages that have their own dependencies,
-// optionally tracking in the dependency graph.
-func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, rootDir string, graph *resolve.DependencyGraph) error {
-	nodeModulesPath := filepath.Join(rootDir, "node_modules")
+// optionally tracking in the dependency graph. workspaceRoot locates hoisted
+// node_modules and anchors web paths; packageRoot selects which manifest's
+// direct dependencies seed the traversal.
+func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, workspaceRoot, packageRoot string, graph *resolve.DependencyGraph) error {
+	nodeModulesPath := filepath.Join(workspaceRoot, "node_modules")
 
 	var (
 		mu      sync.Mutex
@@ -656,8 +665,10 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 	)
 
 	// Direct dependencies and additional packages both get top-level imports,
-	// so both need transitive scopes.
-	packages, err := r.directDependencyNames(rootDir, nil)
+	// so both need transitive scopes. Select them from the package root, not
+	// the workspace root: a --package subdirectory's dependencies are hoisted
+	// into the workspace node_modules but declared in the package manifest.
+	packages, err := r.directDependencyNames(packageRoot, nil)
 	if err != nil {
 		return err
 	}
@@ -669,7 +680,7 @@ func (r *Resolver) addTransitiveDependenciesWithGraph(im *importmap.ImportMap, r
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore
 
-			r.processPackageDependenciesParallelWithGraph(im, &mu, &visited, nodeModulesPath, name, rootDir, graph)
+			r.processPackageDependenciesParallelWithGraph(im, &mu, &visited, nodeModulesPath, name, workspaceRoot, graph)
 		}(depName)
 	}
 
@@ -729,9 +740,9 @@ func (r *Resolver) processPackageAtPath(
 	for name := range r.excluded {
 		delete(allDeps, name)
 	}
-	if len(allDeps) > maxDependencyEntries {
+	if len(allDeps) > resolve.MaxDependencyEntries {
 		if r.logger != nil {
-			r.logger.Warning("Package %s declares %d dependencies (maximum %d); skipping its scope", pkgName, len(allDeps), maxDependencyEntries)
+			r.logger.Warning("Package %s declares %d dependencies (maximum %d); skipping its scope", pkgName, len(allDeps), resolve.MaxDependencyEntries)
 		}
 		return
 	}
@@ -784,6 +795,9 @@ func (r *Resolver) processPackageAtPath(
 		}
 
 		for _, e := range depPkg.ImportMapEntries(opts) {
+			if !withinPackage(depPath, e.Path) {
+				continue
+			}
 			url := r.expandDepURL(depName, e.Path, isNested, depPath, rootDir)
 			scopeEntries[depName+e.Key] = url
 		}
@@ -812,7 +826,8 @@ func (r *Resolver) processPackageAtPath(
 // finally the workspace-root node_modules. npm may install a different version
 // of a transitive dep inside the parent's own node_modules when the hoisted
 // version doesn't satisfy the constraint.
-// Returns the path and whether it was found outside the workspace root.
+// Returns the path and whether it is a nested copy rather than the hoisted
+// workspace-root one.
 func (r *Resolver) findDependencyPath(parentPkgPath, rootNodeModules, depName string) (string, bool) {
 	rootNodeModules = filepath.Clean(rootNodeModules)
 	rootCandidate := filepath.Join(rootNodeModules, depName)
@@ -820,7 +835,7 @@ func (r *Resolver) findDependencyPath(parentPkgPath, rootNodeModules, depName st
 	// served from the project and would produce URLs escaping the web root.
 	workspaceRoot := filepath.Dir(rootNodeModules)
 	dir := filepath.Clean(parentPkgPath)
-	for isWithinDir(workspaceRoot, dir) {
+	for resolve.IsWithinDir(workspaceRoot, dir) {
 		// When dir is the root node_modules itself, the candidate would be a
 		// nonsensical node_modules/node_modules path. The root candidate is
 		// probed at the workspace root below instead.
@@ -867,6 +882,36 @@ func parsePackageName(spec string) string {
 
 // validPackageName rejects names that could escape node_modules or name a
 // path. It accepts unscoped names and a single @scope/name separator.
+// isSchemeTarget reports whether an export target is a URL (for example
+// http:, data:, or node:) rather than a path within the package.
+func isSchemeTarget(target string) bool {
+	if strings.HasPrefix(target, "//") {
+		return true
+	}
+	i := strings.IndexByte(target, ':')
+	if i <= 0 {
+		return false
+	}
+	for j, r := range target[:i] {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case j > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// withinPackage reports whether target stays inside pkgPath. Scheme-bearing
+// targets are not filesystem paths and are skipped.
+func withinPackage(pkgPath, target string) bool {
+	if isSchemeTarget(target) {
+		return false
+	}
+	return resolve.IsWithinDir(pkgPath, filepath.Join(pkgPath, target))
+}
+
 func validPackageName(name string) bool {
 	if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "/") {
 		return false
@@ -879,15 +924,6 @@ func validPackageName(name string) bool {
 		return ok && len(scope) > 1 && rest != "" && !strings.Contains(rest, "/")
 	}
 	return !strings.Contains(name, "/")
-}
-
-// isWithinDir reports whether p resolves inside root.
-func isWithinDir(root, p string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // ResolveIncremental updates an existing import map based on changed packages.

@@ -19,11 +19,52 @@ package trace
 
 import (
 	"strings"
+	"sync"
 
 	"bennypowers.dev/mappa/importmap"
 	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/resolve/local"
 )
+
+// ResolutionMemo caches resolved import maps by bare-specifier set so files
+// with the same dependencies share one resolution. Concurrent callers for the
+// same key coalesce, and every caller receives a deep clone so it may mutate
+// the result without affecting another file.
+type ResolutionMemo struct {
+	entries sync.Map // map[string]*memoEntry
+}
+
+type memoEntry struct {
+	once sync.Once
+	im   *importmap.ImportMap
+	err  error
+}
+
+// NewResolutionMemo creates an empty resolution memo.
+func NewResolutionMemo() *ResolutionMemo {
+	return &ResolutionMemo{}
+}
+
+// MemoKey returns the memo key for a bare-specifier list.
+func MemoKey(bareSpecs []string) string {
+	return strings.Join(bareSpecs, "\x00")
+}
+
+// Resolve returns a clone of the cached map for key, calling resolve on a
+// miss. Failed resolutions are not cached so a later file can retry.
+func (m *ResolutionMemo) Resolve(key string, resolve func() (*importmap.ImportMap, error)) (*importmap.ImportMap, error) {
+	entry := &memoEntry{}
+	actual, _ := m.entries.LoadOrStore(key, entry)
+	entry = actual.(*memoEntry)
+	entry.once.Do(func() {
+		entry.im, entry.err = resolve()
+	})
+	if entry.err != nil {
+		m.entries.CompareAndDelete(key, entry)
+		return nil, entry.err
+	}
+	return entry.im.Clone(), nil
+}
 
 // ResolveForSpecifiers builds a minimal import map containing only the given
 // bare specifiers, their exact resolutions, and the scopes reachable from

@@ -40,11 +40,14 @@ func newLRU[V any](maxSize int) *lru[V] {
 	}
 }
 
-// get returns the value for key without refreshing its recency.
+// get returns the value for key and marks it as most recently used.
 func (l *lru[V]) get(key string) (V, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	v, ok := l.entries[key]
+	if ok {
+		l.touchLocked(key)
+	}
 	return v, ok
 }
 

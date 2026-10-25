@@ -42,7 +42,12 @@ jobs:
         with:
           node-version: 22
       - name: Build WASM
-        run: make wasm
+        run: |
+          MAPPA_EXPECTED_VERSION="$(git describe --tags --always --dirty)"
+          echo "MAPPA_EXPECTED_VERSION=$MAPPA_EXPECTED_VERSION" >> "$GITHUB_ENV"
+          make wasm WASM_VERSION="$MAPPA_EXPECTED_VERSION"
+      - name: Run WASM transport tests
+        run: make test-wasm
       - name: Install npm dependencies
         working-directory: npm
         run: npm ci

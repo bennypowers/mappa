@@ -22,11 +22,9 @@ package trace
 
 import (
 	"errors"
-	"maps"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 
 	"bennypowers.dev/mappa/fs"
@@ -86,14 +84,17 @@ type IssueJSON struct {
 
 // BatchResult holds the result of tracing a single file in batch mode.
 type BatchResult struct {
-	File     string                       `json:"file"`
-	Imports  map[string]string            `json:"imports"`
-	Scopes   map[string]map[string]string `json:"scopes,omitempty"`
-	Error    string                       `json:"error,omitempty"`
-	Warnings []Warning                    `json:"warnings,omitempty"`
+	File    string                       `json:"file"`
+	Imports map[string]string            `json:"imports"`
+	Scopes  map[string]map[string]string `json:"scopes,omitempty"`
+	Error   string                       `json:"error,omitempty"`
+	// Warnings are printed to stderr by the CLI and deliberately excluded
+	// from the NDJSON contract, which reserves "warnings" for GraphErrors.
+	Warnings []Warning `json:"-"`
 	// GraphErrors surfaces non-fatal tracing errors (unresolved or unreadable
-	// modules) so callers do not silently receive a partial map.
-	GraphErrors []string `json:"errors,omitempty"`
+	// modules) so callers do not silently receive a partial map. Fatal errors
+	// go in Error, so the JSON contract maps them to "error" and "warnings".
+	GraphErrors []string `json:"warnings,omitempty"`
 }
 
 // Warning represents a single import validation warning.
@@ -328,7 +329,7 @@ func TraceBatch(osfs fs.FileSystem, files []string, absRoot string, opts Options
 
 		// Memoize resolutions by the file's bare-specifier set. Many pages in
 		// a batch share the same dependency set.
-		memo := &sync.Map{} // map[string]*importmap.ImportMap
+		memo := NewResolutionMemo()
 
 		// Start worker goroutines
 		var wg sync.WaitGroup
@@ -355,7 +356,7 @@ func TraceBatch(osfs fs.FileSystem, files []string, absRoot string, opts Options
 }
 
 // traceFileForBatch traces a single file and returns a BatchResult.
-func traceFileForBatch(tracer *Tracer, osfs fs.FileSystem, htmlFile, absRoot, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, memo *sync.Map) BatchResult {
+func traceFileForBatch(tracer *Tracer, osfs fs.FileSystem, htmlFile, absRoot, workspaceRoot string, baseResolver *local.Resolver, pkg *packagejson.PackageJSON, memo *ResolutionMemo) BatchResult {
 	result := BatchResult{File: htmlFile, Imports: make(map[string]string)}
 
 	graph, err := tracer.TraceHTML(htmlFile)
@@ -396,28 +397,17 @@ func traceFileForBatch(tracer *Tracer, osfs fs.FileSystem, htmlFile, absRoot, wo
 		return result
 	}
 
-	memoKey := strings.Join(bareSpecs, "\x00")
-	simplified, ok := memo.Load(memoKey)
-	var resolved *importmap.ImportMap
-	if ok {
-		resolved = simplified.(*importmap.ImportMap)
-	} else {
-		var err error
-		resolved, err = ResolveForSpecifiers(baseResolver, workspaceRoot, bareSpecs, pkg)
-		if err != nil {
-			result.Error = err.Error()
-			return result
-		}
-		memo.Store(memoKey, resolved)
+	resolved, err := memo.Resolve(MemoKey(bareSpecs), func() (*importmap.ImportMap, error) {
+		return ResolveForSpecifiers(baseResolver, workspaceRoot, bareSpecs, pkg)
+	})
+	if err != nil {
+		result.Error = err.Error()
+		return result
 	}
 
-	result.Imports = maps.Clone(resolved.Imports)
-	if len(resolved.Scopes) > 0 {
-		result.Scopes = make(map[string]map[string]string, len(resolved.Scopes))
-		for scope, entries := range resolved.Scopes {
-			result.Scopes[scope] = maps.Clone(entries)
-		}
-	}
+	// Resolve returns a clone owned by this result.
+	result.Imports = resolved.Imports
+	result.Scopes = resolved.Scopes
 
 	return result
 }

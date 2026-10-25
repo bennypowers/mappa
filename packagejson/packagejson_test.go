@@ -18,9 +18,14 @@ package packagejson_test
 
 import (
 	"encoding/json"
+	iofs "io/fs"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
+	"bennypowers.dev/mappa/internal/mapfs"
 	"bennypowers.dev/mappa/packagejson"
 	"bennypowers.dev/mappa/testutil"
 )
@@ -53,6 +58,79 @@ func TestParseFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+type fakeFileInfo struct {
+	name string
+	size int64
+}
+
+func (f fakeFileInfo) Name() string        { return f.name }
+func (f fakeFileInfo) Size() int64         { return f.size }
+func (f fakeFileInfo) Mode() iofs.FileMode { return 0o644 }
+func (f fakeFileInfo) ModTime() time.Time  { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool         { return false }
+func (f fakeFileInfo) Sys() any            { return nil }
+
+// oversizedFS lets a test control the reported stat size and the bytes read
+// for one path independently.
+type oversizedFS struct {
+	*mapfs.MapFileSystem
+	target      string
+	statSize    int64
+	readContent []byte
+}
+
+func (f *oversizedFS) Stat(name string) (iofs.FileInfo, error) {
+	if filepath.Clean(name) == filepath.Clean(f.target) {
+		return fakeFileInfo{name: filepath.Base(name), size: f.statSize}, nil
+	}
+	return f.MapFileSystem.Stat(name)
+}
+
+func (f *oversizedFS) ReadFile(name string) ([]byte, error) {
+	if filepath.Clean(name) == filepath.Clean(f.target) {
+		return f.readContent, nil
+	}
+	return f.MapFileSystem.ReadFile(name)
+}
+
+func TestParseFileRejectsOversizedManifest(t *testing.T) {
+	t.Run("stat size", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "packagejson/simple-exports", "/test")
+		osfs := &oversizedFS{
+			MapFileSystem: mfs,
+			target:        "/test/package.json",
+			statSize:      packagejson.MaxPackageJSONSize + 1,
+			readContent:   []byte(`{}`),
+		}
+
+		_, err := packagejson.ParseFile(osfs, "/test/package.json")
+		if err == nil {
+			t.Fatal("expected an oversized package.json error")
+		}
+		if !strings.Contains(err.Error(), "exceeds maximum size") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("post-read length", func(t *testing.T) {
+		mfs := testutil.NewFixtureFS(t, "packagejson/simple-exports", "/test")
+		osfs := &oversizedFS{
+			MapFileSystem: mfs,
+			target:        "/test/package.json",
+			statSize:      1,
+			readContent:   make([]byte, packagejson.MaxPackageJSONSize+1),
+		}
+
+		_, err := packagejson.ParseFile(osfs, "/test/package.json")
+		if err == nil {
+			t.Fatal("expected an oversized package.json error")
+		}
+		if !strings.Contains(err.Error(), "exceeds maximum size") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestResolveExport(t *testing.T) {

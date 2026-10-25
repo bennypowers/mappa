@@ -56,10 +56,6 @@ type Resolver struct {
 // DefaultRequestTimeout bounds each registry and CDN request.
 const DefaultRequestTimeout = 30 * time.Second
 
-// maxDependencyEntries caps the number of dependencies accepted from a single
-// package.json, preventing unbounded fan-out from untrusted manifests.
-const maxDependencyEntries = 10000
-
 // New creates a new CDN resolver with default settings.
 func New(fetcher mappacdn.Fetcher) *Resolver {
 	tmpl, _ := resolve.ParseTemplate(mappacdn.DefaultProvider.ModuleTemplate)
@@ -225,8 +221,8 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 		delete(deps, pkg)
 	}
 
-	if len(deps) > maxDependencyEntries {
-		return nil, fmt.Errorf("package.json declares %d dependencies (maximum %d)", len(deps), maxDependencyEntries)
+	if len(deps) > resolve.MaxDependencyEntries {
+		return nil, resolve.DependencyCapError("package.json", len(deps))
 	}
 	if len(deps) == 0 {
 		return result, nil
@@ -269,6 +265,11 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 		}
 		return result, errors.Join(errs...)
 	}
+	// Cancellation closes the queue without recording an error for every
+	// abandoned task, so surface the context error when no task reported one.
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
@@ -293,6 +294,36 @@ type resolveState struct {
 	queue    *taskQueue
 	pending  atomic.Int64
 	workers  sync.WaitGroup
+	// manifests coalesces package.json fetches for the lifetime of this
+	// resolution pass. The shared PackageCache is size-bounded, so a large
+	// graph can evict and refetch a shared dependency; this map guarantees
+	// each manifest is fetched at most once per run.
+	manifests sync.Map // map[string]*manifestEntry
+}
+
+// manifestEntry is one package.json fetch shared by concurrent tasks.
+type manifestEntry struct {
+	once sync.Once
+	pkg  *packagejson.PackageJSON
+	err  error
+}
+
+// packageJSON returns the manifest for pkgName@version, fetching it at most
+// once per resolution pass. Failures are not retained so another branch can
+// retry.
+func (s *resolveState) packageJSON(ctx context.Context, pkgName, version string) (*packagejson.PackageJSON, error) {
+	key := pkgName + "@" + version
+	entry := &manifestEntry{}
+	actual, _ := s.manifests.LoadOrStore(key, entry)
+	entry = actual.(*manifestEntry)
+	entry.once.Do(func() {
+		entry.pkg, entry.err = s.resolver.fetchPackageJSON(ctx, pkgName, version)
+	})
+	if entry.err != nil {
+		s.manifests.CompareAndDelete(key, entry)
+		return nil, entry.err
+	}
+	return entry.pkg, nil
 }
 
 func newResolveState(ctx context.Context, resolver *Resolver, im *importmap.ImportMap) *resolveState {
@@ -319,6 +350,12 @@ func (s *resolveState) worker() {
 			return
 		}
 		s.process(task)
+		// Once the caller's context is done, stop draining the queue. Tasks
+		// already in flight record their own cancellation error; the rest are
+		// abandoned so ResolvePackageJSON returns promptly.
+		if s.ctx.Err() != nil {
+			s.queue.close()
+		}
 		if s.pending.Add(-1) == 0 {
 			s.queue.close()
 		}
@@ -343,7 +380,7 @@ func (s *resolveState) process(task *resolveTask) {
 		return
 	}
 
-	pkg, err := r.fetchPackageJSON(ctx, task.name, version)
+	pkg, err := s.packageJSON(ctx, task.name, version)
 	if err != nil {
 		// The package is not marked visited, so another branch referencing it
 		// can retry the fetch.
@@ -385,8 +422,8 @@ func (s *resolveState) process(task *resolveTask) {
 	if !canTraverse {
 		return
 	}
-	if len(pkg.Dependencies) > maxDependencyEntries {
-		s.recordError(task, fmt.Errorf("declares %d dependencies (maximum %d)", len(pkg.Dependencies), maxDependencyEntries))
+	if len(pkg.Dependencies) > resolve.MaxDependencyEntries {
+		s.recordError(task, fmt.Errorf("declares %d dependencies (maximum %d)", len(pkg.Dependencies), resolve.MaxDependencyEntries))
 		return
 	}
 
@@ -461,7 +498,7 @@ func (q *taskQueue) pop() (*resolveTask, bool) {
 	for q.head >= len(q.items) && !q.closed {
 		q.cond.Wait()
 	}
-	if q.head >= len(q.items) {
+	if q.closed || q.head >= len(q.items) {
 		return nil, false
 	}
 	task := q.items[q.head]
@@ -475,6 +512,35 @@ func (q *taskQueue) close() {
 	q.closed = true
 	q.cond.Broadcast()
 	q.mu.Unlock()
+}
+
+// tryPop removes the next task without blocking. It is used to drain a queue
+// when no workers are running.
+func (q *taskQueue) tryPop() (*resolveTask, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed || q.head >= len(q.items) {
+		return nil, false
+	}
+	task := q.items[q.head]
+	q.items[q.head] = nil
+	q.head++
+	return task, true
+}
+
+// drain processes every queued task until the queue is empty. Tests use it to
+// drive work when no worker goroutines are running.
+func (s *resolveState) drain() {
+	for {
+		task, ok := s.queue.tryPop()
+		if !ok {
+			return
+		}
+		s.process(task)
+		if s.pending.Add(-1) == 0 {
+			s.queue.close()
+		}
+	}
 }
 
 // resolveVersion wraps registry.ResolveVersion with an optional per-request timeout.
