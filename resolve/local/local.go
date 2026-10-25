@@ -259,7 +259,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 					subpath = "." + subpath
 				}
 				resolved, err := rootPkg.ResolveExport(subpath, opts)
-				if err != nil || !resolve.IsWithinDir(rootDir, filepath.Join(rootDir, resolved)) {
+				if err != nil || !withinPackage(rootDir, resolved) {
 					continue
 				}
 				result[spec] = "/" + resolved
@@ -324,7 +324,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 			// Resolve the specifier
 			var resolvedPath string
 			resolved, resolveErr := pkg.ResolveExport(subpath, opts)
-			if resolveErr == nil && resolve.IsWithinDir(pkgPath, filepath.Join(pkgPath, resolved)) {
+			if resolveErr == nil && withinPackage(pkgPath, resolved) {
 				resolvedPath = resolved
 			}
 
@@ -337,7 +337,7 @@ func (r *Resolver) ResolveSpecifiers(rootDir string, specifiers []string) map[st
 				}
 			}
 
-			if !resolve.IsWithinDir(pkgPath, filepath.Join(pkgPath, resolvedPath)) {
+			if !withinPackage(pkgPath, resolvedPath) {
 				continue
 			}
 
