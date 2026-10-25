@@ -20,6 +20,7 @@ package cdn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1082,6 +1083,59 @@ func TestCancellationStopsDrainingDeepQueue(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ResolvePackageJSON did not return promptly after cancellation")
+	}
+}
+
+// cancelAfterFetcher cancels the context after the Nth successful request,
+// which is enough to finish the first task and leave the rest queued.
+type cancelAfterFetcher struct {
+	base   mappacdn.Fetcher
+	cancel context.CancelFunc
+	after  int
+	mu     sync.Mutex
+	calls  int
+}
+
+func (f *cancelAfterFetcher) Fetch(ctx context.Context, url string) ([]byte, error) {
+	data, err := f.base.Fetch(ctx, url)
+	f.mu.Lock()
+	f.calls++
+	reached := f.calls == f.after
+	f.mu.Unlock()
+	if reached {
+		f.cancel()
+	}
+	return data, err
+}
+
+func TestCancellationWithoutTaskErrorsReturnsContextError(t *testing.T) {
+	mockFetcher := NewMockFetcher()
+	for _, name := range []string{"dep-a", "dep-b"} {
+		mockFetcher.AddResponse("https://registry.npmjs.org/"+name,
+			testutil.LoadFixtureFile(t, name+"-registry/response.json"))
+		mockFetcher.AddResponse("https://esm.sh/"+name+"@1.0.0/package.json",
+			testutil.LoadFixtureFile(t, name+"-package/package.json"))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// dep-a needs two requests (registry, then package.json); cancel right
+	// after them so the task itself succeeds and dep-b stays queued.
+	resolver := New(&cancelAfterFetcher{
+		base:   mockFetcher,
+		cancel: cancel,
+		after:  2,
+	}).WithConcurrency(1)
+
+	pkg := &packagejson.PackageJSON{Dependencies: map[string]string{
+		"dep-a": "^1.0.0",
+		"dep-b": "^1.0.0",
+	}}
+	_, err := resolver.ResolvePackageJSON(ctx, pkg)
+	if err == nil {
+		t.Fatal("expected cancellation to be reported even when no task failed")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in the chain, got %v", err)
 	}
 }
 

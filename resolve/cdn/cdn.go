@@ -265,6 +265,11 @@ func (r *Resolver) ResolvePackageJSON(ctx context.Context, pkg *packagejson.Pack
 		}
 		return result, errors.Join(errs...)
 	}
+	// Cancellation closes the queue without recording an error for every
+	// abandoned task, so surface the context error when no task reported one.
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
