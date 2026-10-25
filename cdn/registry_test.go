@@ -170,6 +170,43 @@ func TestMatchVersion(t *testing.T) {
 	}
 }
 
+func TestMatchVersionCaretWildcardsAndPrerelease(t *testing.T) {
+	tests := []struct {
+		name         string
+		versions     []string
+		versionRange string
+		want         string
+	}{
+		{
+			"caret keeps its bound above the wildcard minor",
+			[]string{"1.2.0", "1.3.0", "2.0.0"},
+			"^1.2.x",
+			"1.3.0",
+		},
+		{
+			"caret wildcard within a comparator set",
+			[]string{"1.2.0", "1.3.0", "2.0.0"},
+			">=1.0.0 ^1.2.x",
+			"1.3.0",
+		},
+		{
+			"x in a prerelease tag is not a wildcard",
+			[]string{"1.2.3-next", "1.2.4"},
+			"^1.2.3-next",
+			"1.2.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchVersion(tt.versions, tt.versionRange)
+			if got != tt.want {
+				t.Errorf("matchVersion(%v, %q) = %q, want %q", tt.versions, tt.versionRange, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMatchCaretRange(t *testing.T) {
 	tests := []struct {
 		name     string

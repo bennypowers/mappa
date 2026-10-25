@@ -438,10 +438,14 @@ func matchVersion(versions []string, versionRange string) string {
 		return matchComparatorSet(versions, versionRange)
 	}
 
-	// Handle caret ranges (^1.2.3); x-range bases like ^1.x delegate to the
-	// x-range matcher because they have no concrete version to compare.
+	// Handle caret ranges (^1.2.3); x-range bases like ^1.2.x keep caret
+	// bounds (>=1.2.0 <2.0.0), so drop the wildcard components and let the
+	// caret matcher apply them.
 	if base, ok := strings.CutPrefix(versionRange, "^"); ok {
 		if isXRange(base) {
+			if trimmed := trimXRange(base); trimmed != "" {
+				return matchCaretRange(versions, trimmed)
+			}
 			return matchXRange(versions, base)
 		}
 		return matchCaretRange(versions, base)
@@ -534,9 +538,28 @@ func matchVersion(versions []string, versionRange string) string {
 	return ""
 }
 
-// isXRange reports whether a range component uses an x, X, or * wildcard.
+// isXRange reports whether the version components use an x, X, or * wildcard.
+// Prerelease and build suffixes are ignored, so a tag like 1.2.3-next is not
+// mistaken for an x-range.
 func isXRange(s string) bool {
-	return strings.ContainsAny(s, "xX*")
+	core, _, _ := strings.Cut(s, "-")
+	core, _, _ = strings.Cut(core, "+")
+	return strings.ContainsAny(core, "xX*")
+}
+
+// trimXRange removes trailing wildcard components, turning 1.2.x into 1.2 so
+// caret matching can apply its own bounds rather than matchXRange's exact
+// minor match.
+func trimXRange(s string) string {
+	parts := strings.Split(s, ".")
+	for len(parts) > 0 {
+		part := strings.ToLower(strings.TrimSpace(parts[len(parts)-1]))
+		if part != "x" && part != "*" {
+			break
+		}
+		parts = parts[:len(parts)-1]
+	}
+	return strings.Join(parts, ".")
 }
 
 // isCompoundComparatorSet reports whether r is a whitespace-separated
@@ -864,6 +887,9 @@ func versionSatisfies(version, constraint string) bool {
 	}
 	if base, ok := strings.CutPrefix(constraint, "^"); ok {
 		if isXRange(base) {
+			if trimmed := trimXRange(base); trimmed != "" {
+				return matchCaretRange([]string{version}, trimmed) != ""
+			}
 			return matchXRange([]string{version}, base) != ""
 		}
 		return matchCaretRange([]string{version}, base) != ""
