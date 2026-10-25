@@ -935,6 +935,9 @@ func TestResolveDropsExportTargetsEscapingPackageRoot(t *testing.T) {
 	if _, ok := result.Imports["escaper"]; ok {
 		t.Errorf("escaping export target leaked into imports: %v", result.Imports)
 	}
+	if _, ok := result.Imports["escaper/remote"]; ok {
+		t.Errorf("URL export target leaked into imports: %v", result.Imports)
+	}
 	if got := result.Imports["escaper/ok"]; got != "/node_modules/escaper/ok.js" {
 		t.Errorf("escaper/ok = %q, want /node_modules/escaper/ok.js", got)
 	}
@@ -942,10 +945,16 @@ func TestResolveDropsExportTargetsEscapingPackageRoot(t *testing.T) {
 		if _, ok := entries["child"]; ok {
 			t.Errorf("escaping export target leaked into scope %q: %v", scope, entries)
 		}
+		if _, ok := entries["child/remote"]; ok {
+			t.Errorf("URL export target leaked into scope %q: %v", scope, entries)
+		}
 	}
-	for _, value := range result.Imports {
+	for key, value := range result.Imports {
 		if strings.Contains(value, "..") {
 			t.Errorf("import value escapes the web root: %q", value)
+		}
+		if strings.HasPrefix(value, "http") || strings.HasPrefix(value, "/http") {
+			t.Errorf("import %q emitted a URL target as a local path: %q", key, value)
 		}
 	}
 	assertImportMapGolden(t, result, "resolve/escaping-exports/expected.json")
