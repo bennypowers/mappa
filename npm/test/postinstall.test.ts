@@ -302,6 +302,88 @@ describe("postinstall", () => {
     }
   });
 
+  it("does not treat pnpm's npm_execpath as npm", () => {
+    const expectedPkg =
+      platformPackages[`${process.platform}-${process.arch}`];
+    assert.ok(expectedPkg, "test requires a supported platform");
+
+    const tmp = makeTempInstall();
+    try {
+      writeFileSync(
+        join(tmp, "package.json"),
+        JSON.stringify({
+          name: "@pwrs/mappa-fixture",
+          type: "module",
+          version: "1.2.3",
+        })
+      );
+
+      const argvOut = join(tmp, "argv.json");
+      const pnpmCjs = join(tmp, "pnpm.cjs");
+      writeFileSync(pnpmCjs, "");
+      writeStub(join(tmp, "bin"), "npm");
+
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: join(tmp, "bin"),
+        ARGV_OUT: argvOut,
+        npm_execpath: pnpmCjs,
+        npm_config_user_agent: "pnpm/9.0.0 npm/? node/v22.0.0 linux x64",
+      };
+
+      const result = spawnSync(
+        process.execPath,
+        [join(tmp, "dist", "postinstall.js")],
+        { encoding: "utf8", env }
+      );
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(argvOut, "utf8")), [
+        "install",
+        "--no-save",
+        `${expectedPkg}@1.2.3`,
+      ]);
+    } finally {
+      cleanup(tmp);
+    }
+  });
+
+  it("names the manager that actually failed to launch", () => {
+    const tmp = makeTempInstall();
+    try {
+      writeFileSync(
+        join(tmp, "package.json"),
+        JSON.stringify({
+          name: "@pwrs/mappa-fixture",
+          type: "module",
+          version: "1.2.3",
+        })
+      );
+
+      // Empty PATH: neither npm nor yarn can be launched.
+      const binDir = join(tmp, "bin");
+      mkdirSync(binDir);
+
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: binDir,
+        npm_config_user_agent: "yarn/1.22.22 npm/? node/v22.0.0 linux x64",
+      };
+      delete env.npm_execpath;
+
+      const result = spawnSync(
+        process.execPath,
+        [join(tmp, "dist", "postinstall.js")],
+        { encoding: "utf8", env }
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /Failed to launch yarn/);
+    } finally {
+      cleanup(tmp);
+    }
+  });
+
   it("falls back to pnpm add when npm is unavailable", () => {
     const expectedPkg =
       platformPackages[`${process.platform}-${process.arch}`];

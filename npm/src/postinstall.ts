@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, basename, join } from "node:path";
 import { arch, platform } from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -81,7 +81,8 @@ interface InstallCommand {
 }
 
 function npmCommand(): InstallCommand {
-  if (npmExecPath && /npm(-cli)?\.(c|m)?js$/.test(npmExecPath)) {
+  const npmExecName = npmExecPath ? basename(npmExecPath) : "";
+  if (npmExecPath && /^npm(-cli)?\.(c|m)?js$/.test(npmExecName)) {
     return {
       command: process.execPath,
       args: [npmExecPath, ...installArgs],
@@ -136,6 +137,7 @@ function installOptions(
   };
 }
 
+let attempted = primary;
 let result: ReturnType<typeof spawnSync>;
 try {
   result = spawnSync(
@@ -148,6 +150,7 @@ try {
     result.error &&
     (result.error as NodeJS.ErrnoException).code === "ENOENT"
   ) {
+    attempted = managerFallback;
     result = spawnSync(
       managerFallback.command,
       managerFallback.args,
@@ -156,7 +159,7 @@ try {
   }
 } catch (err) {
   console.error(
-    `Failed to launch ${primary.command}: ${
+    `Failed to launch ${attempted.command}: ${
       err instanceof Error ? err.message : String(err)
     }`
   );
@@ -167,10 +170,12 @@ if (result.error) {
   const code = (result.error as NodeJS.ErrnoException).code;
   if (code === "ETIMEDOUT") {
     console.error(
-      `Failed to install ${pkg}@${version}: command timed out after ${installTimeoutMs}ms`
+      `Failed to install ${pkg}@${version} via ${attempted.command}: command timed out after ${installTimeoutMs}ms`
     );
   } else {
-    console.error(`Failed to launch ${primary.command}: ${result.error.message}`);
+    console.error(
+      `Failed to launch ${attempted.command}: ${result.error.message}`
+    );
   }
 }
 if (result.signal) {

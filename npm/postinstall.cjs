@@ -15,7 +15,9 @@ if (!existsSync(target)) {
   process.exit(0);
 }
 
-const timeoutMs = 10 * 60 * 1000;
+// Give the inner installer time to hit its own 10 minute timeout and print
+// diagnostics before this wrapper kills it.
+const timeoutMs = 11 * 60 * 1000;
 const result = spawnSync(process.execPath, [target], {
   // Ignore stdin so the wrapper never consumes the installer's input.
   stdio: ["ignore", "inherit", "inherit"],
