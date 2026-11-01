@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    uses: bennypowers/go-release-workflows/.github/workflows/build-binaries.yml@main
+    uses: bennypowers/go-release-workflows/.github/workflows/build-binaries.yml@v2
     with:
       binary-name: mappa
       # No release-tag = artifacts only + PR comment with build status
